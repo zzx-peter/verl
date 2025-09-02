@@ -119,7 +119,7 @@ ENV/
 
 # data
 *.parquet
-
+*.whl
 
 # local logs
 logs

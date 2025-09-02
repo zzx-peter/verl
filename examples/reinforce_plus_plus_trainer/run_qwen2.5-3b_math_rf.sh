@@ -13,7 +13,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=reinforce_plus_plus \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
-    data.train_batch_size=128 \
+    data.train_batch_size=256 \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
@@ -45,6 +45,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=20 \
-    trainer.total_epochs=5 \
+    trainer.test_freq=10 \
+    trainer.total_epochs=1 \
     trainer.default_local_dir=/root/autodl-tmp/checkpoints/verl_grpo_example_gsm8k/qwen2.5_7b_function_rm $@
