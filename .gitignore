@@ -120,9 +120,12 @@ ENV/
 # data
 *.parquet
 *.whl
+*.csv
+*.xlsx
 
 # local logs
 logs
 log
 outputs
+tools
 .history
