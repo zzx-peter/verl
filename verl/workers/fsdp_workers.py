@@ -653,6 +653,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
 
+        if self._is_aux_model:
+            # Reuse actor config to enable compute_log_prob for aux_model
+            actor_cfg = omega_conf_to_dataclass(self.config.actor)
+            self.actor = DataParallelPPOActor(
+                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=None
+            )
+
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(
                 trust_remote_code=self.config.model.get("trust_remote_code", False)
@@ -793,7 +800,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def compute_log_prob(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
-        assert self._is_actor
+        assert self._is_actor or self._is_aux_model
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 

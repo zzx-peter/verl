@@ -533,6 +533,19 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             )
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
 
+        if self._is_aux_model:
+            # Construct MegatronPPOActor wrapper without optimizer for aux_model to allow compute_log_prob
+            actor_cfg = omega_conf_to_dataclass(self.config.actor)
+            self.actor = MegatronPPOActor(
+                config=actor_cfg,
+                model_config=self.actor_model_config,
+                hf_config=self.hf_config,
+                tf_config=self.tf_config,
+                actor_module=self.actor_module,
+                actor_optimizer=None,
+            )
+            log_gpu_memory_usage("After Megatron aux MegatronPPOActor init", logger=logger)
+
         if self._is_rollout:
             self.rollout, self.sharding_manager = self._build_rollout(
                 trust_remote_code=self.config.model.get("trust_remote_code", False)
@@ -699,7 +712,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @GPUMemoryLogger(role="compute_log_prob", logger=logger)
     @DistProfiler.annotate(color="blue")
     def compute_log_prob(self, data: DataProto):
-        assert self._is_actor
+        assert self._is_actor or self._is_aux_model
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
             log_gpu_memory_usage("After load actor params and grad during compute_log_prob", logger=logger)

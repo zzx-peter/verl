@@ -687,6 +687,9 @@ class RayPPOTrainer:
             aux_config = OmegaConf.create(OmegaConf.to_container(self.config.actor_rollout_ref, resolve=True))
             aux_config.model.path = self.config.aux_model.model.path
 
+            # Force aux_model to use HF rollout to avoid spawning a second vLLM engine
+            aux_config.rollout.name = "hf"
+
             # 仅 aux_model 关闭 sleep，避免同进程双 sleep 实例
             aux_config.rollout.free_cache_engine = False
             
