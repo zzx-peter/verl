@@ -122,7 +122,8 @@ ENV/
 *.whl
 *.csv
 *.xlsx
-
+*.pdf
+*.tex
 # local logs
 logs
 log

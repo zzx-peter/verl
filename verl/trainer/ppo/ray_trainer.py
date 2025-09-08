@@ -50,7 +50,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model, need_aux_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -335,6 +335,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
+        self.use_aux_model = need_aux_model(self.role_worker_mapping)
         self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -673,6 +674,22 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
+        # Initialize auxiliary model worker group if needed
+        if self.use_aux_model:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.AuxModel)
+            # 使用OmegaConf合并配置
+            aux_config = OmegaConf.merge(
+                self.config.actor_rollout_ref,
+                self.config.aux_model
+            )
+            
+            aux_model_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.AuxModel],
+                config=aux_config,
+                role="aux_rollout"
+            )
+            self.resource_pool_to_cls[resource_pool]["aux_model"] = aux_model_cls
+
         # create a reward model if reward_fn is None
         if self.use_rm:
             # we create a RM here
@@ -719,6 +736,11 @@ class RayPPOTrainer:
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
+
+        # Initialize auxiliary model worker group if needed
+        if self.use_aux_model:
+            self.aux_model_wg = all_wg["aux_model"]
+            self.aux_model_wg.init_model()
 
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
@@ -977,12 +999,26 @@ class RayPPOTrainer:
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if not self.async_rollout_mode:
+                            # actor model rollout, pi_theta_old
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+                    
+                    # 如果启用了辅助模型，也生成辅助模型的rollouts
+                    aux_gen_batch_output = None
+                    if self.use_aux_model:
+                        with marked_timer("gen_aux", timing_raw, color="purple"):
+                            # 使用相同的输入prompt让辅助模型生成rollouts
+                            aux_gen_batch_output = self.aux_model_wg.generate_sequences(gen_batch)
+                            # 在输出中标记这是来自辅助模型的数据
+                            aux_gen_batch_output.batch["model_source"] = torch.ones(
+                                aux_gen_batch_output.batch_size[0], dtype=torch.long
+                            )
+                            print(f"Generated {aux_gen_batch_output.batch_size[0]} sequences from auxiliary model")
 
+                    # Remax only
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:
                             raise ValueError("A reward_fn is required for REMAX advantage estimation.")
@@ -1006,7 +1042,24 @@ class RayPPOTrainer:
 
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    
+                    # 标记主模型的数据来源
+                    gen_batch_output.batch["model_source"] = torch.zeros(
+                        gen_batch_output.batch_size[0], dtype=torch.long
+                    )
+                    
+                    # 合并主模型的rollouts到batch中
                     batch = batch.union(gen_batch_output)
+                    
+                    # 如果有辅助模型，将辅助模型的rollouts也合并到batch中
+                    if self.use_aux_model and aux_gen_batch_output is not None:
+                        # 为辅助模型数据创建相应的prompt数据
+                        aux_batch = batch[:len(aux_gen_batch_output)].copy()  # 复制对应数量的prompt数据
+                        aux_batch = aux_batch.union(aux_gen_batch_output)
+                        
+                        # 将辅助模型数据合并到主batch中
+                        batch = batch.cat(aux_batch)
+                        print(f"Combined batch size after adding auxiliary model data: {batch.batch_size[0]}")
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1034,7 +1087,44 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        if self.use_aux_model:
+                            # 分离主模型和辅助模型的数据
+                            main_mask = batch.batch["model_source"] == 0
+                            aux_mask = batch.batch["model_source"] == 1
+                            
+                            # 分别计算old_log_prob
+                            main_batch = batch.filter(main_mask)
+                            aux_batch = batch.filter(aux_mask)
+                            
+                            old_log_prob_main = self.actor_rollout_wg.compute_log_prob(main_batch)
+                            old_log_prob_aux = self.aux_model_wg.compute_log_prob(aux_batch)
+                            
+                            # 创建合并后的old_log_prob对象（模仿compute_log_prob的返回结构）
+                            from verl import DataProto
+                            old_log_prob = DataProto(
+                                batch={
+                                    "old_log_probs": torch.zeros_like(batch.batch["responses"], dtype=torch.float),
+                                    "entropys": torch.zeros_like(batch.batch["responses"], dtype=torch.float)
+                                },
+                                meta_info={}
+                            )
+                            old_log_prob.batch_size = batch.batch_size  # 设置正确的batch_size
+                            
+                            # 完整保存各模型的meta_info
+                            old_log_prob.meta_info.update({
+                                "main_model_meta": old_log_prob_main.meta_info,
+                                "aux_model_meta": old_log_prob_aux.meta_info
+                            })
+                            
+                            # 填入各自模型的结果和meta_info
+                            old_log_prob.batch["old_log_probs"][main_mask] = old_log_prob_main.batch["old_log_probs"]
+                            old_log_prob.batch["entropys"][main_mask] = old_log_prob_main.batch["entropys"]
+                            old_log_prob.batch["old_log_probs"][aux_mask] = old_log_prob_aux.batch["old_log_probs"]
+                            old_log_prob.batch["entropys"][aux_mask] = old_log_prob_aux.batch["entropys"]
+                        else:
+                            # 标准单模型处理
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        # old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1077,6 +1167,7 @@ class RayPPOTrainer:
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
+                            # 
                             batch, kl_metrics = apply_kl_penalty(
                                 batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
                             )
@@ -1085,7 +1176,6 @@ class RayPPOTrainer:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
                         # compute advantages, executed on the driver process
-
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
@@ -1109,10 +1199,19 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
+                        # update actor - 在多模型训练中，所有数据都参与训练
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            if self.use_aux_model:
+                                # 多模型训练：所有数据都参与训练，但需要特殊的importance sampling
+                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                                batch.meta_info["use_multi_model_training"] = True
+                                # 所有数据（主模型+辅助模型）都参与主模型的参数更新
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                                print("Updated main model using rollouts from both main and auxiliary models")
+                            else:
+                                # 标准单模型更新
+                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

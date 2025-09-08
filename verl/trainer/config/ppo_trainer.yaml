@@ -367,3 +367,8 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+aux_model:
+  enable: false
+  model:
+    path: ""

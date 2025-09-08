@@ -35,6 +35,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    AuxModel = 7  # NEW: Auxiliary model for multi-model training
 
 
 def need_reference_policy(
@@ -49,6 +50,13 @@ def need_reward_model(
 ) -> bool:
     """Given a role worker mapping, do we need reward model."""
     return Role.RewardModel in role_worker_mapping
+
+
+def need_aux_model(
+    role_worker_mapping: dict[Role, WorkerType],
+) -> bool:
+    """Given a role worker mapping, do we need auxiliary model for multi-model training."""
+    return Role.AuxModel in role_worker_mapping
 
 
 def need_critic(config: DictConfig) -> bool:

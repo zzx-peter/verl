@@ -200,6 +200,16 @@ class TaskRunner:
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
 
+    def add_aux_model_worker(self, config, aux_policy_cls):
+        """Add auxiliary rollout worker if aux_model is enabled."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        # Aux model is optional; enable it explicitly via config.aux_model.enable
+        if config.aux_model.enable:
+            # Reuse the same worker class family as actor/ref
+            self.role_worker_mapping[Role.AuxModel] = ray.remote(aux_policy_cls)
+            self.mapping[Role.AuxModel] = "global_pool"
+
     def run(self, config):
         """Execute the main PPO training workflow.
 
@@ -234,6 +244,9 @@ class TaskRunner:
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
+        
+        # NEW: Add auxiliary model if enabled
+        self.add_aux_model_worker(config, actor_rollout_cls)
 
         # validate config
         validate_config(

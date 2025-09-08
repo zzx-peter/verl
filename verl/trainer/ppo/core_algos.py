@@ -585,6 +585,50 @@ def compute_reinforce_plus_plus_outcome_advantage(
 
     return advantages, returns
 
+@register_adv_est("multi_model_reinforce_plus_plus") 
+def compute_multi_model_reinforce_plus_plus_advantage(
+    token_level_rewards: torch.Tensor, 
+    response_mask: torch.Tensor, 
+    config: Optional[AlgoConfig] = None, 
+    index: np.ndarray = None,
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantages for multi-model REINFORCE++ training.
+    
+    This extends the standard REINFORCE++ algorithm with cross-model advantage fusion:
+    1. Compute REINFORCE++ advantages (like the standard version)
+    2. Apply cross-model advantage fusion: A_i^cross = A_i + A_j
+    3. Normalize advantages across the batch
+    
+    Args:
+        token_level_rewards: Token-level rewards for all data, shape (bs, response_length)
+        response_mask: Response masks, shape (bs, response_length)
+        config: Algorithm configuration with gamma
+        index: Sample indices for grouping prompts, shape (bs,)
+        
+    Returns:
+        advantages: Cross-model enhanced advantages, shape (bs, response_length)
+        returns: Returns for all data, shape (bs, response_length)
+    """
+    assert config is not None
+    gamma = config.gamma
+    
+    with torch.no_grad():
+        # Step 1: 基于REINFORCE++计算returns (与标准版本相同)
+        returns = torch.zeros_like(token_level_rewards)
+        running_return = 0
+        
+        for t in reversed(range(token_level_rewards.shape[1])):
+            running_return = token_level_rewards[:, t] + gamma * running_return
+            returns[:, t] = running_return
+            # Reset after EOS
+            running_return = running_return * response_mask[:, t]
+            
+        advantages = verl_F.masked_whiten(returns, response_mask)
+        advantages = advantages * response_mask
+        
+    return advantages, returns
 
 @register_adv_est(AdvantageEstimator.REMAX)  # or simply: @register_adv_est("remax")
 def compute_remax_outcome_advantage(
