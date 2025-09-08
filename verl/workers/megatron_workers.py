@@ -210,24 +210,28 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         set_random_seed(seed=self.config.actor.megatron.seed)
 
         self.role = role
-        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref", "aux_model"]
 
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
-        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
+        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref", "aux_model"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+        self._is_aux_model = self.role == "aux_model"
 
         if self._is_actor:
             omega_profiler_config = config.actor.get("profiler", {})
-        elif self._is_rollout:
+        elif self._is_rollout and not self._is_aux_model:
             # NOTE: In colocation mode, rollout config may not take effect (follow the actor config)
             # This is for extendability in AsyncRL cases
             omega_profiler_config = config.rollout.get("profiler", {})
         elif self._is_ref:
             omega_profiler_config = config.ref.get("profiler", {})
+        elif self._is_aux_model:
+            # Auxiliary model uses rollout config for profiling but functions as rollout
+            omega_profiler_config = config.rollout.get("profiler", {})
         else:
             raise ValueError(
                 f"Invalid role {self.role}, should be one of "
-                "['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref']"
+                "['actor', 'rollout', 'ref', 'actor_rollout', 'actor_rollout_ref', 'aux_model']"
             )
         # omega_profiler_config is DictConfig
         # profiler_config is a ProfilerConfig dataclass

@@ -677,16 +677,26 @@ class RayPPOTrainer:
         # Initialize auxiliary model worker group if needed
         if self.use_aux_model:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.AuxModel)
-            # 使用OmegaConf合并配置
-            aux_config = OmegaConf.merge(
-                self.config.actor_rollout_ref,
-                self.config.aux_model
-            )
+            
+            # Create aux_model config by inheriting from actor_rollout_ref
+            # This ensures aux_model gets all the same settings:
+            # - VLLM configuration (free_cache_engine=False)
+            # - GPU memory utilization
+            # - Sampling parameters
+            # - All other rollout settings
+            aux_config = OmegaConf.create(OmegaConf.to_container(self.config.actor_rollout_ref, resolve=True))
+            aux_config.model.path = self.config.aux_model.model.path
+
+            # 仅 aux_model 关闭 sleep，避免同进程双 sleep 实例
+            aux_config.rollout.free_cache_engine = False
+            
+            print(f"   Model path: {aux_config.model.path}")
+            print(f"   Resource pool: {resource_pool.name_prefix} (shared with main model)")
             
             aux_model_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.AuxModel],
                 config=aux_config,
-                role="aux_rollout"
+                role="aux_model"
             )
             self.resource_pool_to_cls[resource_pool]["aux_model"] = aux_model_cls
 
@@ -1014,9 +1024,9 @@ class RayPPOTrainer:
                             aux_gen_batch_output = self.aux_model_wg.generate_sequences(gen_batch)
                             # 在输出中标记这是来自辅助模型的数据
                             aux_gen_batch_output.batch["model_source"] = torch.ones(
-                                aux_gen_batch_output.batch_size[0], dtype=torch.long
+                                aux_gen_batch_output.batch.batch_size[0], dtype=torch.long
                             )
-                            print(f"Generated {aux_gen_batch_output.batch_size[0]} sequences from auxiliary model")
+                            print(f"Generated {aux_gen_batch_output.batch.batch_size[0]} sequences from auxiliary model")
 
                     # Remax only
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
@@ -1043,23 +1053,27 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     
-                    # 标记主模型的数据来源
-                    gen_batch_output.batch["model_source"] = torch.zeros(
-                        gen_batch_output.batch_size[0], dtype=torch.long
-                    )
-                    
-                    # 合并主模型的rollouts到batch中
-                    batch = batch.union(gen_batch_output)
-                    
-                    # 如果有辅助模型，将辅助模型的rollouts也合并到batch中
+                    # 如果启用了辅助模型，需要为所有数据添加model_source标记
                     if self.use_aux_model and aux_gen_batch_output is not None:
+                        # 标记主模型的数据来源 (在union之前设置！)
+                        gen_batch_output.batch["model_source"] = torch.zeros(
+                            gen_batch_output.batch.batch_size[0], dtype=torch.long
+                        )
+                        print(f"Marked {gen_batch_output.batch.batch_size[0]} sequences from main model")
+                        
+                        # 合并主模型的rollouts到batch中
+                        batch = batch.union(gen_batch_output)
+                        
                         # 为辅助模型数据创建相应的prompt数据
                         aux_batch = batch[:len(aux_gen_batch_output)].copy()  # 复制对应数量的prompt数据
                         aux_batch = aux_batch.union(aux_gen_batch_output)
                         
                         # 将辅助模型数据合并到主batch中
                         batch = batch.cat(aux_batch)
-                        print(f"Combined batch size after adding auxiliary model data: {batch.batch_size[0]}")
+                        print(f"Combined batch size after adding auxiliary model data: {batch.batch.batch_size[0]}")
+                    else:
+                        # 没有辅助模型时的标准处理
+                        batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -1100,15 +1114,13 @@ class RayPPOTrainer:
                             old_log_prob_aux = self.aux_model_wg.compute_log_prob(aux_batch)
                             
                             # 创建合并后的old_log_prob对象（模仿compute_log_prob的返回结构）
-                            from verl import DataProto
-                            old_log_prob = DataProto(
-                                batch={
+                            old_log_prob = DataProto.from_dict(
+                                tensors={
                                     "old_log_probs": torch.zeros_like(batch.batch["responses"], dtype=torch.float),
                                     "entropys": torch.zeros_like(batch.batch["responses"], dtype=torch.float)
                                 },
                                 meta_info={}
                             )
-                            old_log_prob.batch_size = batch.batch_size  # 设置正确的batch_size
                             
                             # 完整保存各模型的meta_info
                             old_log_prob.meta_info.update({

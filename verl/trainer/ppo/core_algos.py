@@ -97,6 +97,7 @@ class AdvantageEstimator(str, Enum):
     GRPO = "grpo"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
+    MULTI_MODEL_REINFORCE_PLUS_PLUS = "multi_model_reinforce_plus_plus"
     REMAX = "remax"
     RLOO = "rloo"
     OPO = "opo"
@@ -585,7 +586,7 @@ def compute_reinforce_plus_plus_outcome_advantage(
 
     return advantages, returns
 
-@register_adv_est("multi_model_reinforce_plus_plus") 
+@register_adv_est(AdvantageEstimator.MULTI_MODEL_REINFORCE_PLUS_PLUS) 
 def compute_multi_model_reinforce_plus_plus_advantage(
     token_level_rewards: torch.Tensor, 
     response_mask: torch.Tensor, 

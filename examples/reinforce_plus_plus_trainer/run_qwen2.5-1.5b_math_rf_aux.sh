@@ -1,8 +1,10 @@
 set -x
 
 # Paths (edit to your dataset/model locations)
-gsm8k_train_path=/path/to/gsm8k/train.parquet
-gsm8k_test_path=/path/to/gsm8k/test.parquet
+gsm8k_train_path=/root/autodl-tmp/gsm8k/train.parquet
+gsm8k_test_path=/root/autodl-tmp/gsm8k/test.parquet
+math_train_path=/root/autodl-tmp/math/train.parquet
+math_test_path=/root/autodl-tmp/math/test.parquet
 
 # Main and auxiliary models
 main_model=Qwen/Qwen2.5-1.5B-Instruct

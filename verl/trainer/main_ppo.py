@@ -164,15 +164,22 @@ class TaskRunner:
         self.role_worker_mapping[Role.Critic] = ray.remote(CriticWorker)
 
     def init_resource_pool_mgr(self, config):
-        """Initialize resource pool manager."""
+        """Initialize resource pool manager.
+        
+        VERL uses a single global resource pool for all models (actor, critic, ref, reward, aux).
+        This design allows efficient resource sharing and automatic VLLM instance management.
+        """
         from verl.trainer.ppo.ray_trainer import Role
 
         global_pool_id = "global_pool"
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
+        
+        # Map all roles to the same resource pool (VERL standard pattern)
         self.mapping[Role.ActorRollout] = global_pool_id
         self.mapping[Role.Critic] = global_pool_id
+        # Note: RewardModel, RefPolicy, and AuxModel are mapped in their respective add_*_worker methods
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -201,14 +208,28 @@ class TaskRunner:
             self.mapping[Role.RefPolicy] = "global_pool"
 
     def add_aux_model_worker(self, config, aux_policy_cls):
-        """Add auxiliary rollout worker if aux_model is enabled."""
+        """Add auxiliary rollout worker if aux_model is enabled.
+        
+        The aux_model follows the same pattern as ref_model and reward_model:
+        1. Uses the same worker class as the main actor
+        2. Maps to the global_pool (shared with all other models)
+        3. VLLM sleep mode automatically handles instance conflicts
+        
+        Args:
+            config: Training configuration
+            aux_policy_cls: Worker class (same as actor/ref, e.g., FSDPWorker)
+        """
         from verl.trainer.ppo.ray_trainer import Role
 
         # Aux model is optional; enable it explicitly via config.aux_model.enable
         if config.aux_model.enable:
-            # Reuse the same worker class family as actor/ref
+            # Validate aux model configuration
+            if not config.aux_model.model.path:
+                raise ValueError("aux_model.model.path must be specified when aux_model.enable=True")
+            
+            # Follow VERL standard pattern: same worker class, same resource pool
             self.role_worker_mapping[Role.AuxModel] = ray.remote(aux_policy_cls)
-            self.mapping[Role.AuxModel] = "global_pool"
+            self.mapping[Role.AuxModel] = "global_pool"  # Same as ref, critic, reward models
 
     def run(self, config):
         """Execute the main PPO training workflow.

@@ -370,5 +370,17 @@ ray_kwargs:
 
 aux_model:
   enable: false
+  
+  # Auxiliary model configuration for multi-model training
+  # 
+  # The aux_model performs rollout sampling alongside the main model,
+  # but does NOT update its parameters. All sampled data from both models
+  # is used to train the main model, with different old_log_prob calculations.
+  #
+  # Architecture: aux_model shares the same resource pool as other models (ref, critic, reward)
+  # VLLM instances use sleep mode to avoid conflicts automatically.
   model:
+    # Path to the auxiliary model (REQUIRED when enable=true)
+    # All other settings (GPU memory, sampling params, etc.) are inherited 
+    # from actor_rollout_ref configuration
     path: ""
