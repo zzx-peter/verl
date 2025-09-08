@@ -81,11 +81,11 @@ class ResourcePoolManager:
         """
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
             # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
-            # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
-            # For Megatron backend, we recommend using max_colocate_count>1
-            # that can utilize different WorkerGroup for differnt models
+            # Default: 1 (merge all roles into a single process). If aux_model is enabled,
+            # allow 2 processes so actor and aux_model can each own a vLLM sleep-mode instance.
+            max_colocate = 2 if Role.AuxModel in self.mapping.values() or Role.AuxModel in self.mapping else 1
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=1, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=max_colocate, name_prefix=resource_pool_name
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -685,16 +685,8 @@ class RayPPOTrainer:
             # - Sampling parameters
             # - All other rollout settings
             aux_config = OmegaConf.create(OmegaConf.to_container(self.config.actor_rollout_ref, resolve=True))
-            aux_config.model.path = self.config.aux_model.model.path
-
-            # Force aux_model to use HF rollout to avoid spawning a second vLLM engine
-            aux_config.rollout.name = "hf"
-
-            # 仅 aux_model 关闭 sleep，避免同进程双 sleep 实例
-            aux_config.rollout.free_cache_engine = False
-            
+            aux_config.model.path = self.config.aux_model.model.path            
             print(f"   Model path: {aux_config.model.path}")
-            print(f"   Resource pool: {resource_pool.name_prefix} (shared with main model)")
             
             aux_model_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.AuxModel],
@@ -733,14 +725,38 @@ class RayPPOTrainer:
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            wg_dict = self.ray_worker_group_cls(
-                resource_pool=resource_pool,
-                ray_cls_with_init=worker_dict_cls,
-                **wg_kwargs,
-            )
-            spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
-            all_wg.update(spawn_wg)
+            # If aux_model is enabled, spawn it as a dedicated WorkerGroup (separate process)
+            # within the same resource pool to satisfy vLLM's "one sleep-mode instance per process" rule.
+            if self.use_aux_model and ("aux_model" in class_dict):
+                main_class_dict = {k: v for k, v in class_dict.items() if k != "aux_model"}
+                if len(main_class_dict) > 0:
+                    worker_dict_cls_main = create_colocated_worker_cls(class_dict=main_class_dict)
+                    wg_dict_main = self.ray_worker_group_cls(
+                        resource_pool=resource_pool,
+                        ray_cls_with_init=worker_dict_cls_main,
+                        **wg_kwargs,
+                    )
+                    spawn_wg_main = wg_dict_main.spawn(prefix_set=main_class_dict.keys())
+                    all_wg.update(spawn_wg_main)
+
+                aux_only_dict = {"aux_model": class_dict["aux_model"]}
+                worker_dict_cls_aux = create_colocated_worker_cls(class_dict=aux_only_dict)
+                wg_dict_aux = self.ray_worker_group_cls(
+                    resource_pool=resource_pool,
+                    ray_cls_with_init=worker_dict_cls_aux,
+                    **wg_kwargs,
+                )
+                spawn_wg_aux = wg_dict_aux.spawn(prefix_set=aux_only_dict.keys())
+                all_wg.update(spawn_wg_aux)
+            else:
+                worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+                wg_dict = self.ray_worker_group_cls(
+                    resource_pool=resource_pool,
+                    ray_cls_with_init=worker_dict_cls,
+                    **wg_kwargs,
+                )
+                spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
+                all_wg.update(spawn_wg)
 
         if self.use_critic:
             self.critic_wg = all_wg["critic"]
@@ -1058,6 +1074,10 @@ class RayPPOTrainer:
                     
                     # 如果启用了辅助模型，需要为所有数据添加model_source标记
                     if self.use_aux_model and aux_gen_batch_output is not None:
+                        # 在主模型union之前，先保存用于aux的干净基底
+                        aux_len = aux_gen_batch_output.batch.batch_size[0]
+                        base_for_aux = batch[:aux_len]
+                        
                         # 标记主模型的数据来源 (在union之前设置！)
                         gen_batch_output.batch["model_source"] = torch.zeros(
                             gen_batch_output.batch.batch_size[0], dtype=torch.long
@@ -1067,12 +1087,11 @@ class RayPPOTrainer:
                         # 合并主模型的rollouts到batch中
                         batch = batch.union(gen_batch_output)
                         
-                        # 为辅助模型数据创建相应的prompt数据
-                        aux_batch = batch[:len(aux_gen_batch_output)].copy()  # 复制对应数量的prompt数据
-                        aux_batch = aux_batch.union(aux_gen_batch_output)
+                        # 使用干净的基底与辅助模型输出合并
+                        aux_batch = base_for_aux.union(aux_gen_batch_output)
                         
                         # 将辅助模型数据合并到主batch中
-                        batch = batch.cat(aux_batch)
+                        batch = DataProto.concat([batch, aux_batch])
                         print(f"Combined batch size after adding auxiliary model data: {batch.batch.batch_size[0]}")
                     else:
                         # 没有辅助模型时的标准处理
@@ -1110,8 +1129,8 @@ class RayPPOTrainer:
                             aux_mask = batch.batch["model_source"] == 1
                             
                             # 分别计算old_log_prob
-                            main_batch = batch.filter(main_mask)
-                            aux_batch = batch.filter(aux_mask)
+                            main_batch = batch.select_idxs(main_mask)
+                            aux_batch = batch.select_idxs(aux_mask)
                             
                             old_log_prob_main = self.actor_rollout_wg.compute_log_prob(main_batch)
                             old_log_prob_aux = self.aux_model_wg.compute_log_prob(aux_batch)
