@@ -34,7 +34,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-    actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.rollout.n=2 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=True \
@@ -42,7 +42,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["tensorboard"]' \
     trainer.val_before_train=True \
     trainer.project_name='verl_reinforce++_gsm8k' \
-    trainer.experiment_name='qwen2.5_1.5b_function_rm' \
+    trainer.experiment_name='qwen2.5_1.5b_function_rm_2' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

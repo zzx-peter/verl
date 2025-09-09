@@ -8,7 +8,7 @@ math_test_path=/root/autodl-tmp/math/test.parquet
 
 # Main and auxiliary models
 main_model=Qwen/Qwen2.5-1.5B-Instruct
-aux_model=Qwen/Qwen2.5-3B-Instruct
+aux_model=/root/merged_hf_model/qwen2.5_1.5b_3b_rf++_gsm8k
 
 train_files="['$gsm8k_train_path']"
 test_files="['$gsm8k_test_path']"
@@ -49,7 +49,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["tensorboard"]' \
     trainer.val_before_train=True \
     trainer.project_name='verl_multi_model_reinforce++' \
-    trainer.experiment_name='qwen2.5_1.5b_3b_gsm8k' \
+    trainer.experiment_name='qwen2.5_1.5b_3b_rf++_gsm8k' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

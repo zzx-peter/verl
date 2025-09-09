@@ -1135,7 +1135,6 @@ class RayPPOTrainer:
                             old_log_prob_main = self.actor_rollout_wg.compute_log_prob(main_batch)
                             old_log_prob_aux = self.aux_model_wg.compute_log_prob(aux_batch)
                             
-                            # 创建合并后的old_log_prob对象（模仿compute_log_prob的返回结构）
                             old_log_prob = DataProto.from_dict(
                                 tensors={
                                     "old_log_probs": torch.zeros_like(batch.batch["responses"], dtype=torch.float),
@@ -1144,13 +1143,15 @@ class RayPPOTrainer:
                                 meta_info={}
                             )
                             
-                            # 完整保存各模型的meta_info
-                            old_log_prob.meta_info.update({
-                                "main_model_meta": old_log_prob_main.meta_info,
-                                "aux_model_meta": old_log_prob_aux.meta_info
-                            })
+                            # 仅保留必要的温度信息，保持与VERL默认行为一致
+                            if "temperature" in old_log_prob_main.meta_info:
+                                old_log_prob.meta_info["temperature"] = old_log_prob_main.meta_info["temperature"]
+                            elif "temperature" in old_log_prob_aux.meta_info:
+                                old_log_prob.meta_info["temperature"] = old_log_prob_aux.meta_info["temperature"]
+                            else:
+                                old_log_prob.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
                             
-                            # 填入各自模型的结果和meta_info
+                            # 填入各自模型的结果
                             old_log_prob.batch["old_log_probs"][main_mask] = old_log_prob_main.batch["old_log_probs"]
                             old_log_prob.batch["entropys"][main_mask] = old_log_prob_main.batch["entropys"]
                             old_log_prob.batch["old_log_probs"][aux_mask] = old_log_prob_aux.batch["old_log_probs"]
