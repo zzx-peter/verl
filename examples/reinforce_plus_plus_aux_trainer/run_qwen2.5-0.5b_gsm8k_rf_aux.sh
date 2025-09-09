@@ -1,16 +1,22 @@
 set -x
 
-
+# Paths (edit to your dataset/model locations)
 gsm8k_train_path=/root/autodl-tmp/gsm8k/train.parquet
 gsm8k_test_path=/root/autodl-tmp/gsm8k/test.parquet
 math_train_path=/root/autodl-tmp/math/train.parquet
 math_test_path=/root/autodl-tmp/math/test.parquet
 
-train_files="['$math_train_path']"
-test_files="['$math_test_path']"
+# Main and auxiliary models
+main_model=Qwen/Qwen2.5-0.5B-Instruct
+aux_model=/root/merged_hf_model/qwen2.5_1.5b_3b_rf++_gsm8k
+
+train_files="['$gsm8k_train_path']"
+test_files="['$gsm8k_test_path']"
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=reinforce_plus_plus \
+    algorithm.adv_estimator=multi_model_reinforce_plus_plus \
+    algorithm.use_kl_in_reward=True \
+    algorithm.kl_penalty=kl \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.train_batch_size=128 \
@@ -18,7 +24,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-1.5B-Instruct \
+    actor_rollout_ref.model.path=$main_model \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=16  \
@@ -37,15 +43,16 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    algorithm.use_kl_in_reward=True \
+    aux_model.enable=True \
+    aux_model.model.path=$aux_model \
     trainer.critic_warmup=0 \
     trainer.logger='["tensorboard"]' \
     trainer.val_before_train=True \
-    trainer.project_name='verl_reinforce++' \
-    trainer.experiment_name='qwen2.5_1.5b_rf++_math' \
+    trainer.project_name='verl_multi_model_reinforce++' \
+    trainer.experiment_name='qwen2.5_0.5b_3b_rf++_gsm8k' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=3 \
-    trainer.total_epochs=1 \
-    trainer.default_local_dir=/root/autodl-tmp/checkpoints/verl_reinforce++_math/qwen2.5_1.5b_function_rm $@
+    trainer.test_freq=5 \
+    trainer.total_epochs=3 \
+    trainer.default_local_dir=/root/autodl-tmp/checkpoints/verl_reinforce++/qwen2.5_0.5b_3b_gsm8k $@
