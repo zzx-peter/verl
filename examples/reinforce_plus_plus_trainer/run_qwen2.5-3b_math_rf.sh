@@ -40,12 +40,12 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     trainer.critic_warmup=0 \
     trainer.logger='["tensorboard"]' \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.project_name='verl_reinforce++_gsm8k' \
     trainer.experiment_name='qwen2.5_3b_function_rm' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.test_freq=2 \
+    trainer.save_freq=100 \
+    trainer.test_freq=10 \
     trainer.total_epochs=1 \
     trainer.default_local_dir=/root/autodl-tmp/checkpoints/verl_reinforce++_gsm8k/qwen2.5_7b_function_rm $@
