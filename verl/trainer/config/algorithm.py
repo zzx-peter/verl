@@ -73,6 +73,8 @@ class AlgoConfig(BaseConfig):
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
+        aux_model_weight (float): Weight applied to auxiliary model samples during advantage computation.
+            Default 0.8 means aux model samples contribute 80% compared to main model samples.
     """
 
     gamma: float = 1.0
@@ -85,3 +87,4 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+    aux_model_weight: float = 0.8

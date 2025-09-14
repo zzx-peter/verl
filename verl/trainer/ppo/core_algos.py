@@ -98,6 +98,7 @@ class AdvantageEstimator(str, Enum):
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     MULTI_MODEL_REINFORCE_PLUS_PLUS = "multi_model_reinforce_plus_plus"
+    MULTI_MODEL_REINFORCE_PLUS_PLUS_BASELINE = "multi_model_reinforce_plus_plus_baseline"
     REMAX = "remax"
     RLOO = "rloo"
     OPO = "opo"
@@ -441,6 +442,71 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
 
     return scores, scores
 
+@register_adv_est(
+    AdvantageEstimator.MULTI_MODEL_REINFORCE_PLUS_PLUS_BASELINE
+)  # or simply: @register_adv_est("reinforce_plus_plus_baseline")
+def compute_multi_model_reinforce_plus_plus_baseline_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: torch.Tensor,
+    epsilon: float = 1e-6,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for RF++-baseline (https://arxiv.org/abs/2501.03262), operating only on Outcome reward
+    (with only one scalar reward for each response).
+
+    Args:
+        token_level_rewards: `(torch.Tensor)`
+            shape: (bs, response_length)
+        response_mask: `(torch.Tensor)`
+            shape: (bs, response_length)
+        config: (AlgoConfig) algorithm config
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape: (bs, response_length)
+    """
+    response_length = token_level_rewards.shape[-1]
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+    model_source = kwargs.get("model_source", None)
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        main_model_mask = model_source == 0
+        main_model_scores = scores[main_model_mask]
+        main_model_index = index[main_model_mask]
+        mbsz = main_model_scores.shape[0]
+        # here we only use main model to compute the mean
+        for i in range(mbsz):
+            id2score[main_model_index[i]].append(main_model_scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            scores[i] = scores[i] - id2mean[index[i]]
+        
+        # Step 2: apply aux_model weight (if model_source information is available)
+        aux_model_weight = config.aux_model_weight
+        if model_source is not None:
+            # create weight tensor: main model = 1.0, aux model = aux_model_weight
+            weights = torch.ones(scores.shape[0], dtype=scores.dtype, device=scores.device)
+            aux_mask = model_source != 0  # aux model mask
+            weights[aux_mask] = aux_model_weight
+            scores = scores * weights.unsqueeze(-1)
+        scores = scores.unsqueeze(-1).tile([1, response_length]) * response_mask
+        scores = verl_F.masked_whiten(scores, response_mask) * response_mask
+    return scores, scores
 
 @register_adv_est(AdvantageEstimator.RLOO)  # or simply: @register_adv_est("rloo")
 def compute_rloo_outcome_advantage(
@@ -591,25 +657,25 @@ def compute_multi_model_reinforce_plus_plus_advantage(
     token_level_rewards: torch.Tensor, 
     response_mask: torch.Tensor, 
     config: Optional[AlgoConfig] = None, 
-    index: np.ndarray = None,
     **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantages for multi-model REINFORCE++ training.
     
-    This extends the standard REINFORCE++ algorithm with cross-model advantage fusion:
-    1. Compute REINFORCE++ advantages (like the standard version)
-    2. Apply cross-model advantage fusion: A_i^cross = A_i + A_j
+    This extends the standard REINFORCE++ algorithm with auxiliary model weighting:
+    1. Compute REINFORCE++ advantages (standard version)
+    2. Apply auxiliary model weighting based on model_source
     3. Normalize advantages across the batch
     
     Args:
         token_level_rewards: Token-level rewards for all data, shape (bs, response_length)
         response_mask: Response masks, shape (bs, response_length)
-        config: Algorithm configuration with gamma
+        config: Algorithm configuration with gamma and aux_model_weight
         index: Sample indices for grouping prompts, shape (bs,)
+        **kwargs: Additional arguments including model_source
         
     Returns:
-        advantages: Cross-model enhanced advantages, shape (bs, response_length)
+        advantages: Weighted and normalized advantages, shape (bs, response_length)
         returns: Returns for all data, shape (bs, response_length)
     """
     assert config is not None
@@ -626,6 +692,19 @@ def compute_multi_model_reinforce_plus_plus_advantage(
             # Reset after EOS
             running_return = running_return * response_mask[:, t]
             
+        # Step 2: 应用aux_model权重 (如果有model_source信息)
+        model_source = kwargs.get("model_source", None)
+        aux_model_weight = config.aux_model_weight
+        if model_source is not None:
+            # 创建权重tensor：主模型=1.0，辅助模型=aux_model_weight
+            weights = torch.ones(returns.shape[0], dtype=returns.dtype, device=returns.device)
+            aux_mask = model_source != 0  # 辅助模型的mask
+            weights[aux_mask] = aux_model_weight
+            
+            # 应用权重到returns上 (在归一化之前)
+            returns = returns * weights.unsqueeze(-1)  # broadcast to (bs, seq_len)
+            
+        # Step 3: 归一化advantages
         advantages = verl_F.masked_whiten(returns, response_mask)
         advantages = advantages * response_mask
         
