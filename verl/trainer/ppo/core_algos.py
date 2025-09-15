@@ -483,6 +483,7 @@ def compute_multi_model_reinforce_plus_plus_baseline_outcome_advantage(
         main_model_scores = scores[main_model_mask]
         main_model_index = index[main_model_mask]
         mbsz = main_model_scores.shape[0]
+        print(f"mbsz is {mbsz}")
         # here we only use main model to compute the mean
         for i in range(mbsz):
             id2score[main_model_index[i]].append(main_model_scores[i])
@@ -498,12 +499,13 @@ def compute_multi_model_reinforce_plus_plus_baseline_outcome_advantage(
         
         # Step 2: apply aux_model weight (if model_source information is available)
         aux_model_weight = config.aux_model_weight
+        print(f"aux_model_weight is {aux_model_weight}")
         if model_source is not None:
             # create weight tensor: main model = 1.0, aux model = aux_model_weight
             weights = torch.ones(scores.shape[0], dtype=scores.dtype, device=scores.device)
             aux_mask = model_source != 0  # aux model mask
             weights[aux_mask] = aux_model_weight
-            scores = scores * weights.unsqueeze(-1)
+            scores = scores * weights
         scores = scores.unsqueeze(-1).tile([1, response_length]) * response_mask
         scores = verl_F.masked_whiten(scores, response_mask) * response_mask
     return scores, scores
