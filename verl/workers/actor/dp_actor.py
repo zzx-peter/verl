@@ -385,10 +385,33 @@ class DataParallelPPOActor(BasePPOActor):
             )
             select_keys.append("rollout_log_probs")
 
+        # if model_source is in the data.batch.keys(), add it to the select_keys
+        if "model_source" in data.batch.keys():
+            select_keys.append("model_source")
+
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
+
+        # 数据均衡：当存在 model_source 时，交替排列主模型和辅助模型数据
+        if "model_source" in data.batch.keys():
+            model_source = data.batch["model_source"]
+            main_indices = (model_source == 0).nonzero(as_tuple=True)[0]  # 主模型索引
+            aux_indices = (model_source == 1).nonzero(as_tuple=True)[0]   # 辅助模型索引
+            
+            # 交替排列：[主0, 辅0, 主1, 辅1, 主2, 辅2, ...]
+            interleaved_indices = []
+            max_len = max(len(main_indices), len(aux_indices))
+            for i in range(max_len):
+                if i < len(main_indices):
+                    interleaved_indices.append(main_indices[i])
+                if i < len(aux_indices):
+                    interleaved_indices.append(aux_indices[i])
+            
+            reorder_indices = torch.stack(interleaved_indices)
+            data = data.reorder(reorder_indices)
+            print(f"Data reordered: {len(main_indices)} main + {len(aux_indices)} aux samples")
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
@@ -418,7 +441,8 @@ class DataParallelPPOActor(BasePPOActor):
                     old_log_prob = model_inputs["old_log_probs"]
                     rollout_log_probs = model_inputs["rollout_log_probs"] if self.config.tis_imp_ratio_cap > 0 else None
                     advantages = model_inputs["advantages"]
-
+                    # model_source is just equal to aux_model.enable
+                    model_source = model_inputs["model_source"] if "model_source" in model_inputs else None
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
 
@@ -445,15 +469,29 @@ class DataParallelPPOActor(BasePPOActor):
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        loss_agg_mode=loss_agg_mode,
-                        config=self.config,
-                        rollout_log_probs=rollout_log_probs,
-                    )
+                    
+                    # as for now, only vanilla loss mode support model_source
+                    if loss_mode == "vanilla_aux":
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_log_probs=rollout_log_probs,
+                            model_source=model_source,
+                        )
+                    else:
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_log_probs=rollout_log_probs,
+                        )
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)

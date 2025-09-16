@@ -42,6 +42,7 @@ PolicyLossFn = Callable[
         str,  # loss_agg_mode
         Optional[DictConfig | AlgoConfig],  # config
         torch.Tensor | None,  # rollout_log_probs
+        torch.Tensor | None,  # model_source
     ],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ]
@@ -686,7 +687,7 @@ def compute_multi_model_reinforce_plus_plus_advantage(
     gamma = config.gamma
     
     with torch.no_grad():
-        # Step 1: 基于REINFORCE++计算returns (与标准版本相同)
+        # Step 1: compute returns based on REINFORCE++ (same as standard version)
         returns = torch.zeros_like(token_level_rewards)
         running_return = 0
         
@@ -696,19 +697,19 @@ def compute_multi_model_reinforce_plus_plus_advantage(
             # Reset after EOS
             running_return = running_return * response_mask[:, t]
             
-        # Step 2: 应用aux_model权重 (如果有model_source信息)
+        # Step 2: apply aux_model weights (if model_source is available)
         model_source = kwargs.get("model_source", None)
         aux_model_weight = config.aux_model_weight
         if model_source is not None:
-            # 创建权重tensor：主模型=1.0，辅助模型=aux_model_weight
+            # create weight tensor: main model = 1.0, aux model = aux_model_weight
             weights = torch.ones(returns.shape[0], dtype=returns.dtype, device=returns.device)
-            aux_mask = model_source != 0  # 辅助模型的mask
+            aux_mask = model_source != 0  # aux model mask
             weights[aux_mask] = aux_model_weight
             
-            # 应用权重到returns上 (在归一化之前)
+            # apply weights to returns (before normalization)
             returns = returns * weights.unsqueeze(-1)  # broadcast to (bs, seq_len)
             
-        # Step 3: 归一化advantages
+        # Step 3: normalize advantages
         advantages = verl_F.masked_whiten(returns, response_mask)
         advantages = advantages * response_mask
         
@@ -950,6 +951,7 @@ def compute_policy_loss_vanilla(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_log_probs: torch.Tensor | None = None,
+    model_source: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -976,6 +978,47 @@ def compute_policy_loss_vanilla(
 
     assert config is not None
     assert not isinstance(config, AlgoConfig)
+    
+    # if model_source is not None, compute the log_prob mean of the main model and set the weight
+    if model_source is not None:
+        print(f"model_source: {model_source}")
+        # compute the log_prob mean of the main model
+        main_mask = (model_source == 0)  # shape: (batch_size,)
+        aux_mask = (model_source == 1)   # shape: (batch_size,)
+    
+        if main_mask.any():
+            # only compute the log_prob mean of the main model data
+            main_log_prob = log_prob[main_mask]  # shape: (main_samples, response_length)
+            main_response_mask = response_mask[main_mask]  # shape: (main_samples, response_length)
+            main_log_prob_mean = verl_F.masked_mean(main_log_prob, main_response_mask)
+            print(f"Main model log_prob mean: {main_log_prob_mean.item()}")
+
+            # model_source=0 get weight 1.0, model_source=1 get weight log_prob/main_log_prob_mean
+            weights = torch.ones_like(log_prob, dtype=log_prob.dtype)  # shape: (batch_size, response_length)
+            
+            # safe check: prevent division by zero or numerical instability
+            if abs(main_log_prob_mean.item()) < 1e-8:
+                print(f"Warning: main_log_prob_mean is too close to zero ({main_log_prob_mean.item()}), using weight=1.0 for aux model")
+                # if the main model log_prob mean is close to zero, set the weight for aux model to 1.0
+            else:
+                # the weight for main model data is 1.0 (already initialized to 1)
+                # the weight for aux model data is log_prob / main_log_prob_mean
+                if aux_mask.any():
+                    aux_log_prob = log_prob[aux_mask]  # shape: (aux_samples, response_length)
+                    aux_weights = aux_log_prob / main_log_prob_mean  # shape: (aux_samples, response_length)
+                    
+                    # clip the weight to prevent extreme values
+                    aux_weights = torch.clamp(aux_weights, min=0.1, max=3.0)
+                    weights[aux_mask] = aux_weights
+                    print(f"Aux model weights range: [{aux_weights.min().item():.4f}, {aux_weights.max().item():.4f}]")
+        else:
+            print("Warning: No main model data found, using weight=1.0 for all samples")
+            weights = torch.ones_like(log_prob, dtype=log_prob.dtype)
+        
+        # apply the weight to the advantages (weights already have the correct shape)
+        advantages = advantages * weights
+        print(f"Applied weights to advantages based on model_source")
+
     clip_ratio = config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
@@ -1028,7 +1071,6 @@ def compute_policy_loss_vanilla(
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
-
 
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
