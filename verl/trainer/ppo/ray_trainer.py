@@ -1038,13 +1038,13 @@ class RayPPOTrainer:
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
                     
-                    # 如果启用了辅助模型，也生成辅助模型的rollouts
+                    # if auxiliary model is enabled, also generate rollouts for auxiliary model
                     aux_gen_batch_output = None
                     if self.use_aux_model:
                         with marked_timer("gen_aux", timing_raw, color="purple"):
-                            # 使用相同的输入prompt让辅助模型生成rollouts
+                            # use the same input prompt to generate rollouts for auxiliary model
                             aux_gen_batch_output = self.aux_model_wg.generate_sequences(gen_batch)
-                            # 在输出中标记这是来自辅助模型的数据
+                            # mark this is from auxiliary model in the output
                             aux_gen_batch_output.batch["model_source"] = torch.ones(
                                 aux_gen_batch_output.batch.batch_size[0], dtype=torch.long
                             )
@@ -1075,29 +1075,29 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     
-                    # 如果启用了辅助模型，需要为所有数据添加model_source标记
+                    # if auxiliary model is enabled, add model_source to all data
                     if self.use_aux_model and aux_gen_batch_output is not None:
-                        # 在主模型union之前，先保存用于aux的干净基底
+                        # save clean base for auxiliary model before union
                         aux_len = aux_gen_batch_output.batch.batch_size[0]
                         base_for_aux = batch[:aux_len]
                         
-                        # 标记主模型的数据来源 (在union之前设置！)
+                        # mark main model data source (set before union!)
                         gen_batch_output.batch["model_source"] = torch.zeros(
                             gen_batch_output.batch.batch_size[0], dtype=torch.long
                         )
                         print(f"Marked {gen_batch_output.batch.batch_size[0]} sequences from main model")
                         
-                        # 合并主模型的rollouts到batch中
+                        # merge main model rollouts to batch
                         batch = batch.union(gen_batch_output)
                         
-                        # 使用干净的基底与辅助模型输出合并
+                        # use clean base and auxiliary model output to merge
                         aux_batch = base_for_aux.union(aux_gen_batch_output)
                         
-                        # 将辅助模型数据合并到主batch中
+                        # merge auxiliary model data to main batch
                         batch = DataProto.concat([batch, aux_batch])
                         print(f"Combined batch size after adding auxiliary model data: {batch.batch.batch_size[0]}")
                     else:
-                        # 没有辅助模型时的标准处理
+                        # standard single model processing
                         batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
@@ -1127,11 +1127,11 @@ class RayPPOTrainer:
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         if self.use_aux_model:
-                            # 分离主模型和辅助模型的数据
+                            # separate main model and auxiliary model data
                             main_mask = batch.batch["model_source"] == 0
                             aux_mask = batch.batch["model_source"] == 1
                             
-                            # 分别计算old_log_prob
+                            # compute old_log_prob for each model
                             main_batch = batch.select_idxs(main_mask)
                             aux_batch = batch.select_idxs(aux_mask)
                             
@@ -1146,7 +1146,7 @@ class RayPPOTrainer:
                                 meta_info={}
                             )
                             
-                            # 仅保留必要的温度信息，保持与VERL默认行为一致
+                            # only keep necessary temperature info, keep VERL default behavior
                             if "temperature" in old_log_prob_main.meta_info:
                                 old_log_prob.meta_info["temperature"] = old_log_prob_main.meta_info["temperature"]
                             elif "temperature" in old_log_prob_aux.meta_info:
@@ -1154,13 +1154,13 @@ class RayPPOTrainer:
                             else:
                                 old_log_prob.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
                             
-                            # 填入各自模型的结果
+                            # fill in the results of each model
                             old_log_prob.batch["old_log_probs"][main_mask] = old_log_prob_main.batch["old_log_probs"]
                             old_log_prob.batch["entropys"][main_mask] = old_log_prob_main.batch["entropys"]
                             old_log_prob.batch["old_log_probs"][aux_mask] = old_log_prob_aux.batch["old_log_probs"]
                             old_log_prob.batch["entropys"][aux_mask] = old_log_prob_aux.batch["entropys"]
                         else:
-                            # 标准单模型处理
+                            # standard single model processing
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         # old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
@@ -1237,19 +1237,11 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor - 在多模型训练中，所有数据都参与训练
+                        # update actor - in multi-model training, all data are involved in training
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            if self.use_aux_model:
-                                # 多模型训练：所有数据都参与训练，但需要特殊的importance sampling
-                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                                batch.meta_info["use_multi_model_training"] = True
-                                # 所有数据（主模型+辅助模型）都参与主模型的参数更新
-                                actor_output = self.actor_rollout_wg.update_actor(batch)
-                                print("Updated main model using rollouts from both main and auxiliary models")
-                            else:
-                                # 标准单模型更新
-                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                            # standard single model update
+                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

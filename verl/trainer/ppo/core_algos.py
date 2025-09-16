@@ -479,14 +479,16 @@ def compute_multi_model_reinforce_plus_plus_baseline_outcome_advantage(
 
     with torch.no_grad():
         bsz = scores.shape[0]
-        main_model_mask = model_source == 0
-        main_model_scores = scores[main_model_mask]
-        main_model_index = index[main_model_mask]
-        mbsz = main_model_scores.shape[0]
-        print(f"mbsz is {mbsz}")
+        # main_model_mask = model_source == 0
+        # main_model_scores = scores[main_model_mask]
+        # main_model_index = index[main_model_mask]
+        # mbsz = main_model_scores.shape[0]
+        # print(f"mbsz is {mbsz}")
         # here we only use main model to compute the mean
-        for i in range(mbsz):
-            id2score[main_model_index[i]].append(main_model_scores[i])
+        # for i in range(mbsz):
+        #     id2score[main_model_index[i]].append(main_model_scores[i])
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
