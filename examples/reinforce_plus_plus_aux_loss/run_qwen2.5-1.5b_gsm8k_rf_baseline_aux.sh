@@ -49,7 +49,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["tensorboard"]' \
     trainer.val_before_train=True \
     trainer.project_name='qwen2.5_1.5b_3b_gsm8k' \
-    trainer.experiment_name='aux_model_loss' \
+    trainer.experiment_name='aux_model_token_loss' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

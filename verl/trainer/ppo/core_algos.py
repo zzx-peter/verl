@@ -978,46 +978,7 @@ def compute_policy_loss_vanilla(
 
     assert config is not None
     assert not isinstance(config, AlgoConfig)
-    
-    # if model_source is not None, compute the log_prob mean of the main model and set the weight
-    if model_source is not None:
-        print(f"model_source: {model_source}")
-        # compute the log_prob mean of the main model
-        main_mask = (model_source == 0)  # shape: (batch_size,)
-        aux_mask = (model_source == 1)   # shape: (batch_size,)
-    
-        if main_mask.any():
-            # only compute the log_prob mean of the main model data
-            main_log_prob = log_prob[main_mask]  # shape: (main_samples, response_length)
-            main_response_mask = response_mask[main_mask]  # shape: (main_samples, response_length)
-            main_log_prob_mean = verl_F.masked_mean(main_log_prob, main_response_mask)
-            print(f"Main model log_prob mean: {main_log_prob_mean.item()}")
 
-            # model_source=0 get weight 1.0, model_source=1 get weight log_prob/main_log_prob_mean
-            weights = torch.ones_like(log_prob, dtype=log_prob.dtype)  # shape: (batch_size, response_length)
-            
-            # safe check: prevent division by zero or numerical instability
-            if abs(main_log_prob_mean.item()) < 1e-8:
-                print(f"Warning: main_log_prob_mean is too close to zero ({main_log_prob_mean.item()}), using weight=1.0 for aux model")
-                # if the main model log_prob mean is close to zero, set the weight for aux model to 1.0
-            else:
-                # the weight for main model data is 1.0 (already initialized to 1)
-                # the weight for aux model data is log_prob / main_log_prob_mean
-                if aux_mask.any():
-                    aux_log_prob = log_prob[aux_mask]  # shape: (aux_samples, response_length)
-                    aux_weights = aux_log_prob / main_log_prob_mean  # shape: (aux_samples, response_length)
-                    
-                    # clip the weight to prevent extreme values
-                    aux_weights = torch.clamp(aux_weights, min=0.1, max=3.0)
-                    weights[aux_mask] = aux_weights
-                    print(f"Aux model weights range: [{aux_weights.min().item():.4f}, {aux_weights.max().item():.4f}]")
-        else:
-            print("Warning: No main model data found, using weight=1.0 for all samples")
-            weights = torch.ones_like(log_prob, dtype=log_prob.dtype)
-        
-        # apply the weight to the advantages (weights already have the correct shape)
-        advantages = advantages * weights
-        print(f"Applied weights to advantages based on model_source")
 
     clip_ratio = config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
@@ -1035,6 +996,22 @@ def compute_policy_loss_vanilla(
         + f" but get the value: {clip_ratio_c}."
     )
 
+    if model_source is not None:
+        print(f"model_source: {model_source}")       
+        # 选择权重计算方式：global 或 per_position
+        weighting_method = "per_position"  # 可以改为 "per_position"
+        if weighting_method == "global":
+            weights = compute_model_source_weights_global(log_prob, response_mask, model_source)
+        elif weighting_method == "per_position":
+            weights = compute_model_source_weights_per_position(log_prob, response_mask, model_source)
+        else:
+            raise ValueError(f"Unknown weighting method: {weighting_method}")   
+        # use clip like ppo on weights
+        weights = torch.clamp(weights, 1 - cliprange_low, 1 + cliprange_high)
+        # apply the weight to the advantages (weights already have the correct shape)
+        advantages = advantages * weights
+        
+        print(f"Applied {weighting_method} weighting to advantages based on model_source")
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
@@ -1071,6 +1048,105 @@ def compute_policy_loss_vanilla(
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+def compute_model_source_weights_global(log_prob, response_mask, model_source):
+    """
+    计算基于模型来源的权重（配对比较方式）
+    假设 model_source 是 0,1 交替排列的：[0,1,0,1,...]
+    
+    Args:
+        log_prob: shape (batch_size, response_length)
+        response_mask: shape (batch_size, response_length)  
+        model_source: shape (batch_size,)
+        
+    Returns:
+        weights: shape (batch_size, response_length)
+    """
+    print(f"Using paired comparison weighting for model_source: {model_source.shape}")
+    
+    # 初始化权重为1.0
+    weights = torch.ones_like(log_prob, dtype=log_prob.dtype)
+    
+    # 由于是0,1交替排列，奇数索引(1,3,5...)是aux，偶数索引(0,2,4...)是main
+    batch_size = log_prob.shape[0]
+    
+    for i in range(1, batch_size, 2):  # 遍历所有aux索引 (1,3,5,...)
+        if i < batch_size and model_source[i].item() == 1:  # 确认是aux
+            main_idx = i - 1  # 对应的main索引
+            
+            # 计算序列级的平均log_prob
+            aux_log_prob_mean = verl_F.masked_mean(log_prob[i:i+1], response_mask[i:i+1])
+            main_log_prob_mean = verl_F.masked_mean(log_prob[main_idx:main_idx+1], response_mask[main_idx:main_idx+1])
+            
+            # 计算权重：aux_log_prob / main_log_prob
+            if abs(main_log_prob_mean.item()) < 1e-8:
+                weight_value = 1.0
+                print(f"Warning: main_log_prob_mean too small, using weight=1.0 for aux[{i}]")
+            else:
+                weight_value = aux_log_prob_mean - main_log_prob_mean
+                weight_value = torch.clamp(weight_value, min=-10.0, max=10.0)
+                weight_value = torch.exp(weight_value)
+            
+            weights[i] = weight_value
+            print(f"Pair [{main_idx},{i}]: main_mean={main_log_prob_mean.item():.4f}, aux_mean={aux_log_prob_mean.item():.4f}, weight={weight_value.item():.4f}")
+    
+    return weights
+
+
+def compute_model_source_weights_per_position(log_prob, response_mask, model_source):
+    """
+    计算基于模型来源的权重（按位置配对比较方式）
+    假设 model_source 是 0,1 交替排列的：[0,1,0,1,...]
+    按token位置计算权重：weight[i,j] = exp(aux_log_prob[i,j] - main_log_prob[i-1,j])
+    
+    Args:
+        log_prob: shape (batch_size, response_length)
+        response_mask: shape (batch_size, response_length)
+        model_source: shape (batch_size,)
+        
+    Returns:
+        weights: shape (batch_size, response_length)
+    """
+    print(f"Using per-position paired comparison weighting for model_source: {model_source.shape}")
+    
+    # 初始化权重为1.0
+    weights = torch.ones_like(log_prob, dtype=log_prob.dtype)
+    
+    # 由于是0,1交替排列，奇数索引(1,3,5...)是aux，偶数索引(0,2,4...)是main
+    batch_size = log_prob.shape[0]
+    
+    for i in range(1, batch_size, 2):  # 遍历所有aux索引 (1,3,5,...)
+        if i < batch_size and model_source[i].item() == 1:  # 确认是aux
+            main_idx = i - 1  # 对应的main索引         
+            # 按位置计算权重：aux_log_prob[i,j] - main_log_prob[i-1,j]
+            aux_log_prob = log_prob[i]  # shape: (response_length,)
+            main_log_prob = log_prob[main_idx]  # shape: (response_length,)
+            aux_response_mask = response_mask[i]  # shape: (response_length,)
+            main_response_mask = response_mask[main_idx]  # shape: (response_length,)
+            # 只在两者都有效的位置计算权重
+            valid_mask = (aux_response_mask * main_response_mask).bool()  # shape: (response_length,)
+            
+            # 计算权重差值：aux_log_prob - main_log_prob
+            weight_diff = aux_log_prob - main_log_prob  # shape: (response_length,)
+            
+            # clip防止极值
+            weight_diff = torch.clamp(weight_diff, min=-10.0, max=10.0)
+            
+            # 转换为权重：exp(diff)
+            position_weights = torch.exp(weight_diff)  # shape: (response_length,)
+            
+            # 只在有效位置应用权重，其他位置保持1.0
+            aux_weights = torch.where(valid_mask, position_weights, torch.ones_like(position_weights))
+            weights[i] = aux_weights
+            # 统计信息（只统计有效位置）
+            if valid_mask.any():
+                valid_weights = aux_weights[valid_mask]
+                # 计算有效位置的平均值用于打印
+                main_mean = main_log_prob[valid_mask].mean()
+                aux_mean = aux_log_prob[valid_mask].mean()
+                print(f"Pair [{main_idx},{i}]: valid_positions={valid_mask.sum().item()}, main_log_prob_mean={main_mean.item():.4f}, aux_log_prob_mean={aux_mean.item():.4f}, weights_range=[{valid_weights.min().item():.4f}, {valid_weights.max().item():.4f}], mean={valid_weights.mean().item():.4f}")
+    
+    return weights
 
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
