@@ -179,6 +179,12 @@ algorithm:
   # default is 1.0, which means no weighting
   aux_model_weight: 1.0
 
+  # Method for computing weights based on model_source in multi-model training
+  # Choices: "global" (sequence-level weighting), "per_position" (token-level weighting)
+  # "global" uses sequence-level importance sampling similar to GSPO
+  # "per_position" computes weights at token level for fine-grained control
+  model_source_weighting_method: global
+
 # config for the trainer
 trainer:
 

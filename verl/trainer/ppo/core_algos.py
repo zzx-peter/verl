@@ -995,29 +995,70 @@ def compute_policy_loss_vanilla(
         "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
         + f" but get the value: {clip_ratio_c}."
     )
-
-    if model_source is not None:
-        print(f"model_source: {model_source}")       
-        # 选择权重计算方式：global 或 per_position
-        weighting_method = "per_position"  # 可以改为 "per_position"
-        if weighting_method == "global":
-            weights = compute_model_source_weights_global(log_prob, response_mask, model_source)
-        elif weighting_method == "per_position":
-            weights = compute_model_source_weights_per_position(log_prob, response_mask, model_source)
-        else:
-            raise ValueError(f"Unknown weighting method: {weighting_method}")   
-        # use clip like ppo on weights
-        weights = torch.clamp(weights, 1 - cliprange_low, 1 + cliprange_high)
-        # apply the weight to the advantages (weights already have the correct shape)
-        advantages = advantages * weights
-        
-        print(f"Applied {weighting_method} weighting to advantages based on model_source")
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
+    # compute sequence-level importance ratio:
+    # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
+    # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    # Combined ratio at token level:
+    # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
+    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
+    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)  # clamp for numerical stability
+    # finaly exp() to remove log, which can be an option to replace ration
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+    
+    # Initialize weight metrics
+    weight_metrics = {}
+    
+    if model_source is not None:
+        print(f"model_source: {model_source}")       
+        # 从config中获取权重计算方法
+        weighting_method = config.model_source_weighting_method
+        if weighting_method == "global":
+            weights, _ = compute_model_source_weights_global(ratio, response_mask, model_source)
+        elif weighting_method == "per_position":
+            weights, _ = compute_model_source_weights_per_position(ratio, response_mask, model_source)
+        elif weighting_method == "None":
+            weights = torch.ones_like(ratio)
+        else:
+            raise ValueError(f"Unknown weighting method: {weighting_method}. Supported methods: 'global', 'per_position'")   
+        
+        # Calculate weight metrics before clipping
+        valid_weights = torch.masked_select(weights, response_mask.bool())
+        if valid_weights.numel() > 0:
+            weight_metrics["model_weighting/weight_mean_before_clip"] = torch.mean(valid_weights).detach().item()
+        
+        # use clip like ppo on weights
+        weights_clipped = torch.clamp(weights, 1 - cliprange_low, 1 + cliprange_high)
+        
+        # Calculate clipping fractions (similar to pg_clipfrac)
+        weight_upper_clipped = torch.gt(weights, 1 + cliprange_high).float()
+        weight_lower_clipped = torch.lt(weights, 1 - cliprange_low).float()
+        
+        weight_upper_clipfrac = verl_F.masked_mean(weight_upper_clipped, response_mask)
+        weight_lower_clipfrac = verl_F.masked_mean(weight_lower_clipped, response_mask)
+        
+        weight_metrics.update({
+            "model_weighting/weight_upper_clipfrac": weight_upper_clipfrac.detach().item(),
+            "model_weighting/weight_lower_clipfrac": weight_lower_clipfrac.detach().item(),
+        })
+        
+        # Calculate weight metrics after clipping
+        valid_weights_clipped = torch.masked_select(weights_clipped, response_mask.bool())
+        if valid_weights_clipped.numel() > 0:
+            weight_metrics["model_weighting/weight_mean_after_clip"] = torch.mean(valid_weights_clipped).detach().item()
+        
+        # apply the weight to the advantages (weights already have the correct shape)
+        advantages = advantages * weights_clipped
+        
+        print(f"Applied {weighting_method} weighting to advantages based on model_source")
     pg_losses1 = -advantages * ratio
     if cliprange_low is None:
         cliprange_low = cliprange
@@ -1047,7 +1088,7 @@ def compute_policy_loss_vanilla(
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics
 
 def compute_model_source_weights_global(log_prob, response_mask, model_source):
     """
@@ -1066,7 +1107,7 @@ def compute_model_source_weights_global(log_prob, response_mask, model_source):
     
     # 初始化权重为1.0
     weights = torch.ones_like(log_prob, dtype=log_prob.dtype)
-    
+
     # 由于是0,1交替排列，奇数索引(1,3,5...)是aux，偶数索引(0,2,4...)是main
     batch_size = log_prob.shape[0]
     
@@ -1084,11 +1125,13 @@ def compute_model_source_weights_global(log_prob, response_mask, model_source):
                 print(f"Warning: main_log_prob_mean too small, using weight=1.0 for aux[{i}]")
             else:
                 weight_value = aux_log_prob_mean - main_log_prob_mean
-                weight_value = torch.clamp(weight_value, min=-10.0, max=10.0)
+                weight_value = torch.clamp(weight_value, min=-20.0, max=20.0)
                 weight_value = torch.exp(weight_value)
             
             weights[i] = weight_value
             print(f"Pair [{main_idx},{i}]: main_mean={main_log_prob_mean.item():.4f}, aux_mean={aux_log_prob_mean.item():.4f}, weight={weight_value.item():.4f}")
+            with open("global_weight.txt", "a", encoding="utf-8") as f:
+                f.write(f"Pair [{main_idx},{i}]: main_mean={main_log_prob_mean.item():.4f}, aux_mean={aux_log_prob_mean.item():.4f}, weight={weight_value.item():.4f}\n")
     
     return weights
 
@@ -1130,7 +1173,7 @@ def compute_model_source_weights_per_position(log_prob, response_mask, model_sou
             weight_diff = aux_log_prob - main_log_prob  # shape: (response_length,)
             
             # clip防止极值
-            weight_diff = torch.clamp(weight_diff, min=-10.0, max=10.0)
+            weight_diff = torch.clamp(weight_diff, min=-20.0, max=20.0)
             
             # 转换为权重：exp(diff)
             position_weights = torch.exp(weight_diff)  # shape: (response_length,)
@@ -1145,6 +1188,8 @@ def compute_model_source_weights_per_position(log_prob, response_mask, model_sou
                 main_mean = main_log_prob[valid_mask].mean()
                 aux_mean = aux_log_prob[valid_mask].mean()
                 print(f"Pair [{main_idx},{i}]: valid_positions={valid_mask.sum().item()}, main_log_prob_mean={main_mean.item():.4f}, aux_log_prob_mean={aux_mean.item():.4f}, weights_range=[{valid_weights.min().item():.4f}, {valid_weights.max().item():.4f}], mean={valid_weights.mean().item():.4f}")
+                with open("token_weight.txt", "a", encoding="utf-8") as f:
+                    f.write(f"Pair [{main_idx},{i}]: valid_positions={valid_mask.sum().item()}, main_log_prob_mean={main_mean.item():.4f}, aux_log_prob_mean={aux_mean.item():.4f}, weights_range=[{valid_weights.min().item():.4f}, {valid_weights.max().item():.4f}], mean={valid_weights.mean().item():.4f}\n")
     
     return weights
 

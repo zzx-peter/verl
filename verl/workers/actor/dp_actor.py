@@ -488,8 +488,8 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
                     
                     # as for now, only vanilla loss mode support model_source
-                    if "model_source" in data.batch.keys():
-                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                    if "model_source" in data.batch.keys() and loss_mode == "vanilla":
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics = policy_loss_fn(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,
                             advantages=advantages,
@@ -498,6 +498,16 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_log_probs=rollout_log_probs,
                             model_source=model_source,
+                        )
+                    elif loss_mode == "vanilla":
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_log_probs=rollout_log_probs,
                         )
                     else:
                         pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
@@ -509,6 +519,7 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_log_probs=rollout_log_probs,
                         )
+                        weight_metrics = {}
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
@@ -546,7 +557,7 @@ class DataParallelPPOActor(BasePPOActor):
                         }
                     )
                     append_to_dict(metrics, micro_batch_metrics)
-
+                    append_to_dict(metrics, weight_metrics)
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)

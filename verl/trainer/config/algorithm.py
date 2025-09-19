@@ -75,6 +75,9 @@ class AlgoConfig(BaseConfig):
         filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
         aux_model_weight (float): Weight applied to auxiliary model samples during advantage computation.
             Default 0.8 means aux model samples contribute 80% compared to main model samples.
+        model_source_weighting_method (str): Method for computing weights based on model_source.
+            Choices: "global" (sequence-level weighting), "per_position" (token-level weighting).
+            Default "global" uses sequence-level importance sampling similar to GSPO.
     """
 
     gamma: float = 1.0
@@ -88,3 +91,4 @@ class AlgoConfig(BaseConfig):
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
     aux_model_weight: float = 0.8
+    model_source_weighting_method: str = "None"
