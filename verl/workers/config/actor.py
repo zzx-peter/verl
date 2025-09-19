@@ -101,6 +101,7 @@ class ActorConfig(BaseConfig):
     clip_ratio: float = 0.2
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.2
+    model_source_weighting_method: str = "None"
     policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
     clip_ratio_c: float = 3.0
     loss_agg_mode: str = "token-mean"
@@ -120,7 +121,6 @@ class ActorConfig(BaseConfig):
     data_loader_seed = 1
     n: int = 1  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
-
     def __post_init__(self):
         """Validate actor configuration parameters."""
         assert self.strategy != MISSING

@@ -11,6 +11,8 @@ test_files="['$gsm8k_test_path']"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=reinforce_plus_plus_baseline \
+    algorithm.use_kl_in_reward=True \
+    algorithm.kl_penalty=k2 \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.train_batch_size=128 \
@@ -34,15 +36,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-    actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    algorithm.use_kl_in_reward=True \
-    algorithm.kl_penalty=k2 \
     trainer.critic_warmup=0 \
     trainer.logger='["tensorboard"]' \
     trainer.val_before_train=True \
-    trainer.project_name='qwen2.5_1.5b_3b_gsm8k' \
+    trainer.project_name='qwen2.5_1.5b_3b_gsm8k_n8' \
     trainer.experiment_name='baseline' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \

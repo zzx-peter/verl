@@ -1022,11 +1022,11 @@ def compute_policy_loss_vanilla(
         # 从config中获取权重计算方法
         weighting_method = config.model_source_weighting_method
         if weighting_method == "global":
-            weights, _ = compute_model_source_weights_global(ratio, response_mask, model_source)
+            weights = compute_model_source_weights_global(seq_importance_ratio, response_mask, model_source)
         elif weighting_method == "per_position":
-            weights, _ = compute_model_source_weights_per_position(ratio, response_mask, model_source)
+            weights = compute_model_source_weights_per_position(seq_importance_ratio, response_mask, model_source)
         elif weighting_method == "None":
-            weights = torch.ones_like(ratio)
+            weights = torch.ones_like(seq_importance_ratio)
         else:
             raise ValueError(f"Unknown weighting method: {weighting_method}. Supported methods: 'global', 'per_position'")   
         
@@ -1130,7 +1130,7 @@ def compute_model_source_weights_global(log_prob, response_mask, model_source):
             
             weights[i] = weight_value
             print(f"Pair [{main_idx},{i}]: main_mean={main_log_prob_mean.item():.4f}, aux_mean={aux_log_prob_mean.item():.4f}, weight={weight_value.item():.4f}")
-            with open("global_weight.txt", "a", encoding="utf-8") as f:
+            with open("global_weight_seq.txt", "a", encoding="utf-8") as f:
                 f.write(f"Pair [{main_idx},{i}]: main_mean={main_log_prob_mean.item():.4f}, aux_mean={aux_log_prob_mean.item():.4f}, weight={weight_value.item():.4f}\n")
     
     return weights
@@ -1188,7 +1188,7 @@ def compute_model_source_weights_per_position(log_prob, response_mask, model_sou
                 main_mean = main_log_prob[valid_mask].mean()
                 aux_mean = aux_log_prob[valid_mask].mean()
                 print(f"Pair [{main_idx},{i}]: valid_positions={valid_mask.sum().item()}, main_log_prob_mean={main_mean.item():.4f}, aux_log_prob_mean={aux_mean.item():.4f}, weights_range=[{valid_weights.min().item():.4f}, {valid_weights.max().item():.4f}], mean={valid_weights.mean().item():.4f}")
-                with open("token_weight.txt", "a", encoding="utf-8") as f:
+                with open("token_weight_seq.txt", "a", encoding="utf-8") as f:
                     f.write(f"Pair [{main_idx},{i}]: valid_positions={valid_mask.sum().item()}, main_log_prob_mean={main_mean.item():.4f}, aux_log_prob_mean={aux_mean.item():.4f}, weights_range=[{valid_weights.min().item():.4f}, {valid_weights.max().item():.4f}], mean={valid_weights.mean().item():.4f}\n")
     
     return weights

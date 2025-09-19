@@ -90,5 +90,4 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
-    aux_model_weight: float = 0.8
-    model_source_weighting_method: str = "None"
+    aux_model_weight: float = 1.0
