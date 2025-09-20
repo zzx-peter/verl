@@ -160,7 +160,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.role = role
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref", "aux_model"]
 
-        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
+        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref", "aux_model"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref", "aux_model"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
         self._is_aux_model = self.role == "aux_model"
@@ -653,12 +653,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
 
-        if self._is_aux_model:
-            # Reuse actor config to enable compute_log_prob for aux_model
-            actor_cfg = omega_conf_to_dataclass(self.config.actor)
-            self.actor = DataParallelPPOActor(
-                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=None
-            )
+        # if self._is_aux_model:
+        #     # Reuse actor config to enable compute_log_prob for aux_model
+        #     actor_cfg = omega_conf_to_dataclass(self.config.actor)
+        #     self.actor = DataParallelPPOActor(
+        #         config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=None
+        #     )
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(

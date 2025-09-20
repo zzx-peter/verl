@@ -500,7 +500,7 @@ class RayPPOTrainer:
 
         return gen_batch
 
-    def _validate(self):
+    def _validate(self, worker: str = "actor"):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -511,6 +511,7 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
 
+        target_wg = self.actor_rollout_wg if worker == "actor" else self.aux_model_wg
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -547,13 +548,13 @@ class RayPPOTrainer:
 
             # pad to be divisible by dp_size
             size_divisor = (
-                self.actor_rollout_wg.world_size
+                target_wg.world_size
                 if not self.async_rollout_mode
                 else self.config.actor_rollout_ref.rollout.agent.num_workers
             )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+                test_output_gen_batch_padded = target_wg.generate_sequences(test_gen_batch_padded)
             else:
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
@@ -633,7 +634,10 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
-
+        
+        # add prefix to aux metrics to avoid key conflict with actor
+        if worker == "aux":
+            metric_dict = {f"aux/{k}": v for k, v in metric_dict.items()}
         return metric_dict
 
     def init_workers(self):
@@ -1239,12 +1243,26 @@ class RayPPOTrainer:
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor - in multi-model training, all data are involved in training
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            # standard single model update
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            if self.use_aux_model:
+                                # use_aux_model update
+                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                                # reverse the model_source to get the auxiliary model data
+                                aux_batch = batch.copy()
+                                aux_batch.batch["model_source"] = 1 - aux_batch.batch["model_source"]
+                                aux_output = self.aux_model_wg.update_actor(aux_batch)
+                                
+                            else:
+                                # standard single model update
+                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
-
+                        if self.use_aux_model:
+                            aux_output_metrics = reduce_metrics(aux_output.meta_info["metrics"])
+                            # add prefix to aux metrics to avoid key conflict with actor
+                            aux_output_metrics = {f"aux/{k}": v for k, v in aux_output_metrics.items()}
+                            metrics.update(aux_output_metrics)
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
@@ -1283,7 +1301,10 @@ class RayPPOTrainer:
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
-
+                    if self.use_aux_model:
+                        with marked_timer("aux_testing", timing_raw, color="blue"): 
+                            aux_val_metrics: dict = self._validate(worker="aux")
+                        metrics.update(aux_val_metrics)
                 # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                 esi_close_to_expiration = should_save_ckpt_esi(
                     max_steps_duration=self.max_steps_duration,
