@@ -1246,11 +1246,12 @@ class RayPPOTrainer:
                             if self.use_aux_model:
                                 # use_aux_model update
                                 batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                                print(f"Updating actor")
                                 actor_output = self.actor_rollout_wg.update_actor(batch)
                                 # reverse the model_source to get the auxiliary model data
-                                aux_batch = batch.copy()
-                                aux_batch.batch["model_source"] = 1 - aux_batch.batch["model_source"]
-                                aux_output = self.aux_model_wg.update_actor(aux_batch)
+                                print(f"Updating auxiliary model")
+                                batch.batch["model_source"] = 1 - batch.batch["model_source"]
+                                aux_output = self.aux_model_wg.update_actor(batch)
                                 
                             else:
                                 # standard single model update

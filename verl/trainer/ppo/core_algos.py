@@ -1018,7 +1018,7 @@ def compute_policy_loss_vanilla(
     weight_metrics = {}
     
     if model_source is not None:
-        print(f"model_source: {model_source}")       
+        # print(f"model_source: {model_source}")       
         # 从config中获取权重计算方法
         weighting_method = config.model_source_weighting_method
         if weighting_method == "global":
@@ -1058,7 +1058,7 @@ def compute_policy_loss_vanilla(
         # apply the weight to the advantages (weights already have the correct shape)
         advantages = advantages * weights_clipped
         
-        print(f"Applied {weighting_method} weighting to advantages based on model_source")
+        # print(f"Applied {weighting_method} weighting to advantages based on model_source")
     pg_losses1 = -advantages * ratio
     if cliprange_low is None:
         cliprange_low = cliprange
