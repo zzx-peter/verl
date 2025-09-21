@@ -1018,7 +1018,7 @@ def compute_policy_loss_vanilla(
     weight_metrics = {}
     
     if model_source is not None:
-        # print(f"model_source: {model_source}")       
+        print(f"model_source: {model_source}")       
         # 从config中获取权重计算方法
         weighting_method = config.model_source_weighting_method
         if weighting_method == "global":
@@ -1105,33 +1105,41 @@ def compute_model_source_weights_global(log_prob, response_mask, model_source):
     """
     print(f"Using paired comparison weighting for model_source: {model_source.shape}")
     
-    # 初始化权重为1.0
-    weights = torch.ones_like(log_prob, dtype=log_prob.dtype)
-
-    # 由于是0,1交替排列，奇数索引(1,3,5...)是aux，偶数索引(0,2,4...)是main
-    batch_size = log_prob.shape[0]
+    weights = torch.ones_like(log_prob)
     
-    for i in range(1, batch_size, 2):  # 遍历所有aux索引 (1,3,5,...)
-        if i < batch_size and model_source[i].item() == 1:  # 确认是aux
-            main_idx = i - 1  # 对应的main索引
+    # 1. 计算所有model_source=0的数据的log平均值
+    main_mask = model_source == 0
+    aux_mask = model_source == 1
+    
+    if main_mask.any():
+        # 计算main模型数据的平均log_prob
+        main_log_prob_mean = verl_F.masked_mean(log_prob[main_mask], response_mask[main_mask])
+        print(f"Main model log_prob mean: {main_log_prob_mean.item():.4f}")
+        
+        # 2. 对于model_source=0的数据，权重设为1.0
+        weights[main_mask] = 1.0
+        # 计算权重：exp(aux_log_prob_mean - main_log_prob_mean)
+        if abs(main_log_prob_mean.item()) < 1e-8:
+            print(f"Warning: main_log_prob_mean too small, using weight=1.0 for aux[{aux_idx}]")
+            return weights
+        # 3. 对于每个model_source=1的数据，使用自己的log_mean计算权重
+        if aux_mask.any():
+            aux_indices = torch.where(aux_mask)[0]
+            print(f"Processing {len(aux_indices)} aux samples")
             
-            # 计算序列级的平均log_prob
-            aux_log_prob_mean = verl_F.masked_mean(log_prob[i:i+1], response_mask[i:i+1])
-            main_log_prob_mean = verl_F.masked_mean(log_prob[main_idx:main_idx+1], response_mask[main_idx:main_idx+1])
-            
-            # 计算权重：aux_log_prob / main_log_prob
-            if abs(main_log_prob_mean.item()) < 1e-8:
-                weight_value = 1.0
-                print(f"Warning: main_log_prob_mean too small, using weight=1.0 for aux[{i}]")
-            else:
-                weight_value = aux_log_prob_mean - main_log_prob_mean
-                weight_value = torch.clamp(weight_value, min=-20.0, max=20.0)
-                weight_value = torch.exp(weight_value)
-            
-            weights[i] = weight_value
-            print(f"Pair [{main_idx},{i}]: main_mean={main_log_prob_mean.item():.4f}, aux_mean={aux_log_prob_mean.item():.4f}, weight={weight_value.item():.4f}")
-            with open("global_weight_seq.txt", "a", encoding="utf-8") as f:
-                f.write(f"Pair [{main_idx},{i}]: main_mean={main_log_prob_mean.item():.4f}, aux_mean={aux_log_prob_mean.item():.4f}, weight={weight_value.item():.4f}\n")
+            for i, aux_idx in enumerate(aux_indices):
+                # 计算当前aux数据的log_mean
+                aux_log_prob_mean = verl_F.masked_mean(
+                    log_prob[aux_idx], 
+                    response_mask[aux_idx]
+                )
+                aux_weight = aux_log_prob_mean - main_log_prob_mean
+                aux_weight = torch.clamp(aux_weight, min=-20.0, max=20.0)
+                aux_weight = torch.exp(aux_weight)
+                weights[aux_idx] = aux_weight
+                print(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
+                with open("global_weight_seq_update.txt", "a", encoding="utf-8") as f:
+                    f.write(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
     
     return weights
 

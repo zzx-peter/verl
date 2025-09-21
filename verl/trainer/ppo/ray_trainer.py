@@ -1163,16 +1163,31 @@ class RayPPOTrainer:
                             old_log_prob.batch["entropys"][main_mask] = old_log_prob_main.batch["entropys"]
                             old_log_prob.batch["old_log_probs"][aux_mask] = old_log_prob_aux.batch["old_log_probs"]
                             old_log_prob.batch["entropys"][aux_mask] = old_log_prob_aux.batch["entropys"]
+                            
+                            # compute entropy for actor
+                            main_entropys = old_log_prob_main.batch["entropys"]
+                            main_response_masks = batch.batch["response_mask"][main_mask]
+                            main_loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            main_entropy_agg = agg_loss(loss_mat=main_entropys, loss_mask=main_response_masks, loss_agg_mode=main_loss_agg_mode)
+                            main_old_log_prob_metrics = {"actor/entropy": main_entropy_agg.detach().item()}
+                            metrics.update(main_old_log_prob_metrics)
+                            # compute entropy for auxiliary model
+                            aux_entropys = old_log_prob_aux.batch["entropys"]
+                            aux_response_masks = batch.batch["response_mask"][aux_mask]
+                            aux_loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            aux_entropy_agg = agg_loss(loss_mat=aux_entropys, loss_mask=aux_response_masks, loss_agg_mode=aux_loss_agg_mode)
+                            aux_old_log_prob_metrics = {"aux/entropy": aux_entropy_agg.detach().item()}
+                            metrics.update(aux_old_log_prob_metrics)
                         else:
                             # standard single model processing
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        # old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
-                        metrics.update(old_log_prob_metrics)
+                            # old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                            entropys = old_log_prob.batch["entropys"]
+                            response_masks = batch.batch["response_mask"]
+                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                            old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                            metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
 
