@@ -1046,12 +1046,17 @@ class RayPPOTrainer:
                     aux_gen_batch_output = None
                     if self.use_aux_model:
                         with marked_timer("gen_aux", timing_raw, color="purple"):
-                            # use the same input prompt to generate rollouts for auxiliary model
-                            aux_gen_batch_output = self.aux_model_wg.generate_sequences(gen_batch)
-                            # mark this is from auxiliary model in the output
-                            aux_gen_batch_output.batch["model_source"] = torch.ones(
-                                aux_gen_batch_output.batch.batch_size[0], dtype=torch.long
-                            )
+                            if not self.async_rollout_mode:
+                                # use the same input prompt to generate rollouts for auxiliary model
+                                aux_gen_batch_output = self.aux_model_wg.generate_sequences(gen_batch)
+                                # mark this is from auxiliary model in the output
+                                aux_gen_batch_output.batch["model_source"] = torch.ones(
+                                    aux_gen_batch_output.batch.batch_size[0], dtype=torch.long
+                                )
+                            else:
+                                ValueError("Async rollout mode is not supported for auxiliary model")
+                            timing_raw.update(aux_gen_batch_output.meta_info["timing"])
+                            aux_gen_batch_output.meta_info.pop("timing", None)
                             print(f"Generated {aux_gen_batch_output.batch.batch_size[0]} sequences from auxiliary model")
 
                     # Remax only
@@ -1098,7 +1103,21 @@ class RayPPOTrainer:
                         aux_batch = base_for_aux.union(aux_gen_batch_output)
                         
                         # merge auxiliary model data to main batch
-                        batch = DataProto.concat([batch, aux_batch])
+                        # batch = DataProto.concat([batch, aux_batch])
+
+                        # 假设 gen_batch_output 和 aux_gen_batch_output 都有 batch_size=N
+                        combined = DataProto.concat([batch, aux_batch])
+
+                        interleave_idx = []
+                        for i in range(aux_len):
+                            interleave_idx.append(i)       # main
+                            interleave_idx.append(i + aux_len)   # aux
+
+                        # 重排
+                        combined.reorder(torch.tensor(interleave_idx, dtype=torch.long))
+
+                        # 结果：model_source = [0,1,0,1,...]
+                        batch = combined
                         print(f"Combined batch size after adding auxiliary model data: {batch.batch.batch_size[0]}")
                     else:
                         # standard single model processing
@@ -1112,8 +1131,10 @@ class RayPPOTrainer:
                     # but might affect the loss calculation (due to the change of mini-batching).
                     # TODO: Decouple the DP balancing and mini-batching.
                     if self.config.trainer.balance_batch:
+                        print(f"Balancing batch")
                         self._balance_batch(batch, metrics=metrics)
-
+                    else:
+                        print(f"Not balancing batch")
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 

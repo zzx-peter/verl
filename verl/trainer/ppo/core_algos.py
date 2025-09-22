@@ -1004,15 +1004,15 @@ def compute_policy_loss_vanilla(
     # compute sequence-level importance ratio:
     # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
     # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
-    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
-    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
-    # Combined ratio at token level:
-    # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
-    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
-    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
-    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)  # clamp for numerical stability
-    # finaly exp() to remove log, which can be an option to replace ration
-    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+    # seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    # negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    # # Combined ratio at token level:
+    # # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
+    # # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
+    # log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    # log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)  # clamp for numerical stability
+    # # finaly exp() to remove log, which can be an option to replace ration
+    # seq_importance_ratio = torch.exp(log_seq_importance_ratio)
     
     # Initialize weight metrics
     weight_metrics = {}
@@ -1022,11 +1022,11 @@ def compute_policy_loss_vanilla(
         # 从config中获取权重计算方法
         weighting_method = config.model_source_weighting_method
         if weighting_method == "global":
-            weights = compute_model_source_weights_global(seq_importance_ratio, response_mask, model_source)
+            weights = compute_model_source_weights_global(ratio, response_mask, model_source)
         elif weighting_method == "per_position":
-            weights = compute_model_source_weights_per_position(seq_importance_ratio, response_mask, model_source)
+            weights = compute_model_source_weights_per_position(ratio, response_mask, model_source)
         elif weighting_method == "None":
-            weights = torch.ones_like(seq_importance_ratio)
+            weights = torch.ones_like(ratio)
         else:
             raise ValueError(f"Unknown weighting method: {weighting_method}. Supported methods: 'global', 'per_position'")   
         
@@ -1137,9 +1137,9 @@ def compute_model_source_weights_global(log_prob, response_mask, model_source):
                 aux_weight = torch.clamp(aux_weight, min=-20.0, max=20.0)
                 aux_weight = torch.exp(aux_weight)
                 weights[aux_idx] = aux_weight
-                print(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
-                with open("global_weight_seq_update.txt", "a", encoding="utf-8") as f:
-                    f.write(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
+                # print(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
+                # with open("global_weight_seq_update.txt", "a", encoding="utf-8") as f:
+                #     f.write(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
     
     return weights
 

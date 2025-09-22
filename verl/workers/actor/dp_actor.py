@@ -394,46 +394,45 @@ class DataParallelPPOActor(BasePPOActor):
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
-        # data balance: when model_source exists, interleave main and aux data
-        if "model_source" in data.batch.keys():
-            model_source = data.batch["model_source"]
-            main_indices = (model_source == 0).nonzero(as_tuple=True)[0]  # main model index
-            aux_indices = (model_source == 1).nonzero(as_tuple=True)[0]   # aux model index
+        # # data balance: when model_source exists, interleave main and aux data
+        # if "model_source" in data.batch.keys():
+        #     model_source = data.batch["model_source"]
+        #     main_indices = (model_source == 0).nonzero(as_tuple=True)[0]  # main model index
+        #     aux_indices = (model_source == 1).nonzero(as_tuple=True)[0]   # aux model index
             
-            print(f"Before reordering - Main: {len(main_indices)}, Aux: {len(aux_indices)}")
+        #     print(f"Before reordering - Main: {len(main_indices)}, Aux: {len(aux_indices)}")
             
-            # only when both main and aux data exist, do the interleaving
-            if len(main_indices) > 0 and len(aux_indices) > 0:
-                # interleave: [main0, aux0, main1, aux1, main2, aux2, ...]
-                interleaved_indices = []
-                min_len = min(len(main_indices), len(aux_indices))
+        #     # only when both main and aux data exist, do the interleaving
+        #     if len(main_indices) > 0 and len(aux_indices) > 0:
+        #         # interleave: [main0, aux0, main1, aux1, main2, aux2, ...]
+        #         interleaved_indices = []
+        #         min_len = min(len(main_indices), len(aux_indices))
                 
-                # interleave the same number of main and aux data
-                for i in range(min_len):
-                    interleaved_indices.append(main_indices[i])
-                    interleaved_indices.append(aux_indices[i])
+        #         # interleave the same number of main and aux data
+        #         for i in range(min_len):
+        #             interleaved_indices.append(main_indices[i])
+        #             interleaved_indices.append(aux_indices[i])
                 
-                # add the remaining data (if one type of data is more)
-                if len(main_indices) > min_len:
-                    interleaved_indices.extend(main_indices[min_len:])
-                elif len(aux_indices) > min_len:
-                    interleaved_indices.extend(aux_indices[min_len:])
+        #         # add the remaining data (if one type of data is more)
+        #         if len(main_indices) > min_len:
+        #             interleaved_indices.extend(main_indices[min_len:])
+        #         elif len(aux_indices) > min_len:
+        #             interleaved_indices.extend(aux_indices[min_len:])
                 
-                # reorder
-                reorder_indices = torch.stack(interleaved_indices)
-                data.reorder(reorder_indices)  # reorder是就地操作，不返回值
-                print(f"Data reordered with interleaving: {len(main_indices)} main + {len(aux_indices)} aux samples")
+        #         # reorder
+        #         reorder_indices = torch.stack(interleaved_indices)
+        #         data.reorder(reorder_indices)  # reorder是就地操作，不返回值
+        #         print(f"Data reordered with interleaving: {len(main_indices)} main + {len(aux_indices)} aux samples")
                 
-            elif len(main_indices) > 0 or len(aux_indices) > 0:
-                # if only one type of data exists, keep the original order
-                print(f"Only one type of data present - Main: {len(main_indices)}, Aux: {len(aux_indices)}, keeping original order")
-            else:
-                print(f"Warning: No main or aux data found in model_source")
+        #     elif len(main_indices) > 0 or len(aux_indices) > 0:
+        #         # if only one type of data exists, keep the original order
+        #         print(f"Only one type of data present - Main: {len(main_indices)}, Aux: {len(aux_indices)}, keeping original order")
+        #     else:
+        #         print(f"Warning: No main or aux data found in model_source")
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
-        print(f"mini_batches: {len(mini_batches)}")
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
         metrics = {}
