@@ -487,7 +487,7 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
                     
                     # as for now, only vanilla loss mode support model_source
-                    if "model_source" in data.batch.keys() and loss_mode == "vanilla":
+                    if loss_mode == "vanilla":
                         pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics = policy_loss_fn(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,
@@ -497,16 +497,6 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_log_probs=rollout_log_probs,
                             model_source=model_source,
-                        )
-                    elif loss_mode == "vanilla":
-                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics = policy_loss_fn(
-                            old_log_prob=old_log_prob,
-                            log_prob=log_prob,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            loss_agg_mode=loss_agg_mode,
-                            config=self.config,
-                            rollout_log_probs=rollout_log_probs,
                         )
                     else:
                         pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
