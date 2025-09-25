@@ -272,6 +272,8 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
+  # in mapo, we use the gamma to update the performance of main model and aux model
+  mapo_gamma: 0.8
 
 # profiler configs
 global_profiler:

@@ -38,8 +38,20 @@ clip_ratio_low: 0.2
 # Upper bound for asymmetric clipping (used in dual-clip PPO)
 clip_ratio_high: 0.2
 
-# Method for computing weights based on model_source in multi-model training
-model_source_weighting_method: None
+# Upper bound for clipping weights
+clip_weight_high: 0.0
+
+# Lower bound for clipping weights
+clip_weight_low: 0.3
+
+# Method for computing weights based on the similarity between models
+model_source_weighting: false
+
+# Method for computing weights based on the performance among models
+model_source_performance: false
+
+# Different models use different baseline
+model_source_baseline: false
 
 # policy loss config
 policy_loss:

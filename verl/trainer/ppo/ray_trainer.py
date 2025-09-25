@@ -244,12 +244,16 @@ def compute_advantage(
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
+        model_source = None
+        if "model_source" in data.batch:  # optional - for multi-model weighting
+            model_source = data.batch["model_source"]
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            model_source = model_source
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -680,6 +684,22 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
+        # when ref and aux_model are enabled, create aux_ref to compute the ref_log_prob
+        if self.use_reference_policy and self.use_aux_model:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+            # copy the actor_rollout_ref config and change the model.path to aux_model
+            aux_ref_cfg = OmegaConf.create(OmegaConf.to_container(self.config.actor_rollout_ref, resolve=True))
+            # override the model.path (keep other configs the same)
+            aux_ref_cfg.model.path = self.config.aux_model.model.path
+
+            aux_ref_policy_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.RefPolicy],
+                config=aux_ref_cfg,
+                role="ref",
+            )
+            # use a different key to avoid overwriting the original ref
+            self.resource_pool_to_cls[resource_pool]["aux_ref"] = aux_ref_policy_cls
+
         # Initialize auxiliary model worker group if needed
         if self.use_aux_model:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.AuxModel)
@@ -772,6 +792,11 @@ class RayPPOTrainer:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
 
+        # when ref and aux_model are enabled, create aux_ref to compute the ref_log_prob
+        if self.use_reference_policy and self.use_aux_model and not self.ref_in_actor:
+            self.aux_ref_policy_wg = all_wg["aux_ref"]
+            self.aux_ref_policy_wg.init_model()
+        
         # Initialize auxiliary model worker group if needed
         if self.use_aux_model:
             self.aux_model_wg = all_wg["aux_model"]
@@ -1004,6 +1029,9 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
+        aux_model_performance = 0
+        main_model_performance = 0
+        gamma = self.config.trainer.mapo_gamma
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
@@ -1240,12 +1268,39 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
 
+                        # update accuracy of main_model and aux_model
+                        if self.use_aux_model:
+                            main_model_accuracy = batch.batch["token_level_scores"][batch.batch["model_source"] == 0].mean()
+                            aux_model_accuracy = batch.batch["token_level_scores"][batch.batch["model_source"] == 1].mean()
+                            print(f"Main model accuracy: {main_model_accuracy}, Aux model accuracy: {aux_model_accuracy}")
+                            main_model_performance = main_model_performance * gamma + main_model_accuracy * (1 - gamma)
+                            aux_model_performance = aux_model_performance * gamma + aux_model_accuracy * (1 - gamma)
+                            print(f"Main model performance: {main_model_performance}, Aux model performance: {aux_model_performance}")
+                            # compute the ratio of main_model_performance and aux_model_performance
+                            performance = DataProto.from_dict(
+                                tensors={
+                                    "performance": torch.zeros_like(batch.batch["model_source"], dtype=torch.float)
+                                },
+                                meta_info={}
+                            )
+                            # both of the accuarcy can not less than 0.1
+                            if self.global_steps == 1:
+                                main_model_performance = main_model_accuracy
+                                aux_model_performance = aux_model_accuracy
+
+                            main_model_performance = 0.1 if main_model_performance < 0.1 else main_model_performance
+                            aux_model_performance = 0.1 if aux_model_performance < 0.1 else aux_model_performance
+                            performance["performance"] = aux_model_performance / main_model_performance
+                            performance_metrics = {"performance": aux_model_performance / main_model_performance}
+                            metrics.update(performance_metrics)
+                            batch = batch.union(performance)
+
+
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
-                            # 
                             batch, kl_metrics = apply_kl_penalty(
                                 batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
                             )
@@ -1287,8 +1342,37 @@ class RayPPOTrainer:
                                 # reverse the model_source to get the auxiliary model data
                                 print(f"Updating auxiliary model")
                                 batch.batch["model_source"] = 1 - batch.batch["model_source"]
-                                aux_output = self.aux_model_wg.update_actor(batch)
-                                
+                                # use the auxiliary reference model to compute the ref_log_prob
+                                if self.use_reference_policy:
+                                    with marked_timer("aux_ref", timing_raw, color="olive"):
+                                        if not self.ref_in_actor:
+                                            aux_ref_log_prob = self.aux_ref_policy_wg.compute_ref_log_prob(aux_batch)
+                                        else:
+                                            aux_ref_log_prob = self.aux_model_wg.compute_ref_log_prob(aux_batch)
+                                        aux_batch.batch["ref_log_prob"] = aux_ref_log_prob.batch["ref_log_prob"]
+                                # recompute the advantage, the same method but different in group baseline, kl_penalty
+                                with marked_timer("adv_aux", timing_raw, color="brown"):
+                                    # apply_kl_penalty if available
+                                    if self.config.algorithm.use_kl_in_reward:
+                                        batch, kl_metrics = apply_kl_penalty(
+                                            batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
+                                        )
+                                        metrics.update(kl_metrics)
+                                    else:
+                                        batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                                    # recompute the advantage
+                                    batch = compute_advantage(
+                                        batch,
+                                        adv_estimator=self.config.algorithm.adv_estimator,
+                                        gamma=self.config.algorithm.gamma,
+                                        lam=self.config.algorithm.lam,
+                                        num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                        config=self.config.algorithm,
+                                    )
+                                    # recompute the performance
+                                    batch.batch["performance"] = main_model_performance / aux_model_performance
+                                aux_output = self.aux_model_wg.update_actor(batch)                           
                             else:
                                 # standard single model update
                                 batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable

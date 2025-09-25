@@ -98,7 +98,6 @@ class AdvantageEstimator(str, Enum):
     GRPO = "grpo"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
-    MULTI_MODEL_REINFORCE_PLUS_PLUS = "multi_model_reinforce_plus_plus"
     MULTI_MODEL_REINFORCE_PLUS_PLUS_BASELINE = "multi_model_reinforce_plus_plus_baseline"
     REMAX = "remax"
     RLOO = "rloo"
@@ -269,6 +268,7 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    model_source = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -301,6 +301,7 @@ def compute_grpo_outcome_advantage(
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
+    main_id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
 
@@ -318,6 +319,24 @@ def compute_grpo_outcome_advantage(
                 id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
+        # main model and aux model use different baseline in group
+        # recompute the mean
+        if model_source is not None and config.mapo_baseline:
+            print("different model use different baseline in group")
+            main_model_mask = model_source == 0
+            main_model_scores = scores[main_model_mask]
+            main_model_index = index[main_model_mask]
+            mbsz = main_model_scores.shape[0]
+            # here we only use main model to compute the baseline in group
+            for i in range(mbsz):
+                main_id2score[main_model_index[i]].append(main_model_scores[i])
+            for idx in main_id2score:
+                if len(main_id2score[idx]) == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                elif len(main_id2score[idx]) > 1:
+                    id2mean[idx] = torch.mean(torch.stack(main_id2score[idx]))
+                else:
+                    raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
@@ -423,11 +442,22 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
 
     id2score = defaultdict(list)
     id2mean = {}
+    model_source = kwargs.get("model_source", None)
 
     with torch.no_grad():
         bsz = scores.shape[0]
-        for i in range(bsz):
-            id2score[index[i]].append(scores[i])
+        if model_source is not None and config.model_source_baseline:
+            print("different model use different baseline in group")
+            main_model_mask = model_source == 0
+            main_model_scores = scores[main_model_mask]
+            main_model_index = index[main_model_mask]
+            mbsz = main_model_scores.shape[0]
+            # here we only use main model to compute the baseline in group
+            for i in range(mbsz):
+                id2score[main_model_index[i]].append(main_model_scores[i])
+        else :
+            for i in range(bsz):
+                id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -480,16 +510,18 @@ def compute_multi_model_reinforce_plus_plus_baseline_outcome_advantage(
 
     with torch.no_grad():
         bsz = scores.shape[0]
-        main_model_mask = model_source == 0
-        main_model_scores = scores[main_model_mask]
-        main_model_index = index[main_model_mask]
-        mbsz = main_model_scores.shape[0]
-        print(f"mbsz is {mbsz}")
-        # here we only use main model to compute the mean
-        for i in range(mbsz):
-            id2score[main_model_index[i]].append(main_model_scores[i])
-        # for i in range(bsz):
-        #     id2score[index[i]].append(scores[i])
+        if model_source is not None and config.model_source_baseline:
+            print("different model use different baseline in group")
+            main_model_mask = model_source == 0
+            main_model_scores = scores[main_model_mask]
+            main_model_index = index[main_model_mask]
+            mbsz = main_model_scores.shape[0]
+            # here we only use main model to compute the baseline in group
+            for i in range(mbsz):
+                id2score[main_model_index[i]].append(main_model_scores[i])
+        else :
+            for i in range(bsz):
+                id2score[index[i]].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -499,18 +531,10 @@ def compute_multi_model_reinforce_plus_plus_baseline_outcome_advantage(
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
             scores[i] = scores[i] - id2mean[index[i]]
-        
-        # Step 2: apply aux_model weight (if model_source information is available)
-        aux_model_weight = config.aux_model_weight
-        print(f"aux_model_weight is {aux_model_weight}")
-        if model_source is not None:
-            # create weight tensor: main model = 1.0, aux model = aux_model_weight
-            weights = torch.ones(scores.shape[0], dtype=scores.dtype, device=scores.device)
-            aux_mask = model_source != 0  # aux model mask
-            weights[aux_mask] = aux_model_weight
-            scores = scores * weights
+
         scores = scores.unsqueeze(-1).tile([1, response_length]) * response_mask
         scores = verl_F.masked_whiten(scores, response_mask) * response_mask
+
     return scores, scores
 
 @register_adv_est(AdvantageEstimator.RLOO)  # or simply: @register_adv_est("rloo")
@@ -655,64 +679,6 @@ def compute_reinforce_plus_plus_outcome_advantage(
         advantages = verl_F.masked_whiten(returns, response_mask)
         advantages = advantages * response_mask
 
-    return advantages, returns
-
-@register_adv_est(AdvantageEstimator.MULTI_MODEL_REINFORCE_PLUS_PLUS) 
-def compute_multi_model_reinforce_plus_plus_advantage(
-    token_level_rewards: torch.Tensor, 
-    response_mask: torch.Tensor, 
-    config: Optional[AlgoConfig] = None, 
-    **kwargs
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute advantages for multi-model REINFORCE++ training.
-    
-    This extends the standard REINFORCE++ algorithm with auxiliary model weighting:
-    1. Compute REINFORCE++ advantages (standard version)
-    2. Apply auxiliary model weighting based on model_source
-    3. Normalize advantages across the batch
-    
-    Args:
-        token_level_rewards: Token-level rewards for all data, shape (bs, response_length)
-        response_mask: Response masks, shape (bs, response_length)
-        config: Algorithm configuration with gamma and aux_model_weight
-        index: Sample indices for grouping prompts, shape (bs,)
-        **kwargs: Additional arguments including model_source
-        
-    Returns:
-        advantages: Weighted and normalized advantages, shape (bs, response_length)
-        returns: Returns for all data, shape (bs, response_length)
-    """
-    assert config is not None
-    gamma = config.gamma
-    
-    with torch.no_grad():
-        # Step 1: compute returns based on REINFORCE++ (same as standard version)
-        returns = torch.zeros_like(token_level_rewards)
-        running_return = 0
-        
-        for t in reversed(range(token_level_rewards.shape[1])):
-            running_return = token_level_rewards[:, t] + gamma * running_return
-            returns[:, t] = running_return
-            # Reset after EOS
-            running_return = running_return * response_mask[:, t]
-            
-        # Step 2: apply aux_model weights (if model_source is available)
-        model_source = kwargs.get("model_source", None)
-        aux_model_weight = config.aux_model_weight
-        if model_source is not None:
-            # create weight tensor: main model = 1.0, aux model = aux_model_weight
-            weights = torch.ones(returns.shape[0], dtype=returns.dtype, device=returns.device)
-            aux_mask = model_source != 0  # aux model mask
-            weights[aux_mask] = aux_model_weight
-            
-            # apply weights to returns (before normalization)
-            returns = returns * weights.unsqueeze(-1)  # broadcast to (bs, seq_len)
-            
-        # Step 3: normalize advantages
-        advantages = verl_F.masked_whiten(returns, response_mask)
-        advantages = advantages * response_mask
-        
     return advantages, returns
 
 @register_adv_est(AdvantageEstimator.REMAX)  # or simply: @register_adv_est("remax")
@@ -1001,63 +967,6 @@ def compute_policy_loss_vanilla(
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
-    # compute sequence-level importance ratio:
-    # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
-    # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
-    # seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
-    # negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
-    # # Combined ratio at token level:
-    # # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
-    # # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
-    # log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
-    # log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)  # clamp for numerical stability
-    # # finaly exp() to remove log, which can be an option to replace ration
-    # seq_importance_ratio = torch.exp(log_seq_importance_ratio)
-    
-    # Initialize weight metrics
-    weight_metrics = {}
-    
-    if model_source is not None:
-        print(f"model_source: {model_source}")       
-        # 从config中获取权重计算方法
-        weighting_method = config.model_source_weighting_method
-        if weighting_method == "global":
-            weights = compute_model_source_weights_global(log_prob, response_mask, model_source)
-        elif weighting_method == "None":
-            weights = torch.ones_like(log_prob)
-        else:
-            raise ValueError(f"Unknown weighting method: {weighting_method}. Supported methods: 'global', 'None'")   
-        
-        # Calculate weight metrics before clipping
-        valid_weights = torch.masked_select(weights, response_mask.bool())
-        if valid_weights.numel() > 0:
-            weight_metrics["model_weighting/weight_mean_before_clip"] = torch.mean(valid_weights).detach().item()
-        
-        # use clip like ppo on weights
-        weights_clipped = torch.clamp(weights, 1 - cliprange_low, 1 + cliprange_high)
-        
-        # Calculate clipping fractions (similar to pg_clipfrac)
-        weight_upper_clipped = torch.gt(weights, 1 + cliprange_high).float()
-        weight_lower_clipped = torch.lt(weights, 1 - cliprange_low).float()
-        
-        weight_upper_clipfrac = verl_F.masked_mean(weight_upper_clipped, response_mask)
-        weight_lower_clipfrac = verl_F.masked_mean(weight_lower_clipped, response_mask)
-        
-        weight_metrics.update({
-            "model_weighting/weight_upper_clipfrac": weight_upper_clipfrac.detach().item(),
-            "model_weighting/weight_lower_clipfrac": weight_lower_clipfrac.detach().item(),
-        })
-        
-        # Calculate weight metrics after clipping
-        valid_weights_clipped = torch.masked_select(weights_clipped, response_mask.bool())
-        if valid_weights_clipped.numel() > 0:
-            weight_metrics["model_weighting/weight_mean_after_clip"] = torch.mean(valid_weights_clipped).detach().item()
-        
-        # apply the weight to the advantages (weights already have the correct shape)
-        advantages = advantages * weights_clipped
-        
-        # print(f"Applied {weighting_method} weighting to advantages based on model_source")
-
     pg_losses1 = -advantages * ratio
     if cliprange_low is None:
         cliprange_low = cliprange
@@ -1087,60 +996,116 @@ def compute_policy_loss_vanilla(
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
-def compute_model_source_weights_global(log_prob, response_mask, model_source):
+@register_policy_loss("mapo")
+def compute_policy_loss_mapo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+    model_source: torch.Tensor | None = None,
+    performance: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    计算基于模型来源的权重（配对比较方式）
-    假设 model_source 是 0,1 交替排列的：[0,1,0,1,...]
-    
+    Compute the clipped policy objective and related metrics for GSPO.
+
+    See https://arxiv.org/pdf/2507.18071 for more details.
+
     Args:
-        log_prob: shape (batch_size, response_length)
-        response_mask: shape (batch_size, response_length)  
-        model_source: shape (batch_size,)
-        
-    Returns:
-        weights: shape (batch_size, response_length)
+        old_log_prob (torch.Tensor):
+            Log-probabilities of actions under the old policy, shape (batch_size, response_length).
+        log_prob (torch.Tensor):
+            Log-probabilities of actions under the current policy, shape (batch_size, response_length).
+        advantages (torch.Tensor):
+            Advantage estimates for each action, shape (batch_size, response_length).
+        response_mask (torch.Tensor):
+            Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
+        loss_agg_mode (str, optional):
+            Aggregation mode for `agg_loss`. For GSPO, it is recommended to use "seq-mean-token-mean".
     """
-    print(f"Using paired comparison weighting for model_source: {model_source.shape}")
-    
-    weights = torch.ones_like(log_prob)
-    
-    # 1. 计算所有model_source=0的数据的log平均值
-    main_mask = model_source == 0
-    aux_mask = model_source == 1
-    
-    if main_mask.any():
-        # 计算main模型数据的平均log_prob
-        main_log_prob_mean = verl_F.masked_mean(log_prob[main_mask], response_mask[main_mask])
-        print(f"Main model log_prob mean: {main_log_prob_mean.item():.4f}")
-        
-        # 2. 对于model_source=0的数据，权重设为1.0
-        weights[main_mask] = 1.0
-        # 计算权重：exp(aux_log_prob_mean - main_log_prob_mean)
-        if abs(main_log_prob_mean.item()) < 1e-8:
-            print(f"Warning: main_log_prob_mean too small, using weight=1.0 for aux[{aux_idx}]")
-            return weights
-        # 3. 对于每个model_source=1的数据，使用自己的log_mean计算权重
-        if aux_mask.any():
-            aux_indices = torch.where(aux_mask)[0]
-            print(f"Processing {len(aux_indices)} aux samples")
+
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+
+    negative_approx_kl = log_prob - old_log_prob
+
+    # compute sequence-level importance ratio:
+    # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
+    # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    # Initialize weight metrics
+    weight_metrics = {}
+    if model_source is not None:
+        with torch.no_grad():
+            main_mask = model_source == 0
+            if config.model_source_weighting:
+                print(f"model_source: {model_source}")
+                weights = torch.exp(negative_approx_kl_seq)
+                weights = torch.where(main_mask, torch.tensor(1.0, device=weights.device, dtype=weights.dtype), weights) 
+
+                print(f"weights before clipped is {weights.tolist()}")
+                weight_metrics["model_weighting/weight_mean_before_clip"] = torch.mean(weights).detach().item()
+
+                clip_weight_low = config.clip_weight_low
+                clip_weight_high = config.clip_weight_high  
+                # use clip like gspo on weights
+                weights_clipped = torch.clamp(weights, 1 - clip_weight_low, 1 + clip_weight_high)
+                
+                print(f"weights after clipped is {weights_clipped.tolist()}")
+                weight_metrics["model_weighting/weight_mean_after_clip"] = torch.mean(weights_clipped).detach().item()
+
+                # Calculate clipping fractions (similar to pg_clipfrac)
+                weight_upper_clipped = torch.gt(weights, weights_clipped).float().mean()
+                weight_lower_clipped = torch.lt(weights, weights_clipped).float().mean()
+                weight_metrics.update({
+                    "model_weighting/weight_upper_clipfrac": weight_upper_clipped.detach().item(),
+                    "model_weighting/weight_lower_clipfrac": weight_lower_clipped.detach().item(),
+                })
+                
+                # apply the weight to the advantages (normalized by the weight)
+                # no grad
+                w = weights_clipped.detach()
+                eps = 1e-8
+                w = w / (w.sum(dim=-1, keepdim=True) + eps)
+                seq_advantages = torch.sum(advantages * response_mask, dim=-1) / seq_lengths
+                baseline = torch.sum(w * seq_advantages) / (torch.sum(w) + eps)
+                std = torch.std(seq_advantages)
+                seq_advantages_norm = (seq_advantages - baseline) / (std + eps)
+                advantages = seq_advantages_norm * response_mask
+            if config.model_source_performance:
+                aux_performance = torch.where(main_mask, torch.tensor(1.0, device=performance.device, dtype=performance.dtype), performance)
+                advantages = advantages * aux_performance
             
-            for i, aux_idx in enumerate(aux_indices):
-                # 计算当前aux数据的log_mean
-                aux_log_prob_mean = verl_F.masked_mean(
-                    log_prob[aux_idx], 
-                    response_mask[aux_idx]
-                )
-                aux_weight = aux_log_prob_mean - main_log_prob_mean
-                aux_weight = torch.clamp(aux_weight, min=-20.0, max=20.0)
-                aux_weight = torch.exp(aux_weight)
-                weights[aux_idx] = aux_weight
-                # print(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
-                # with open("global_weight_seq_update.txt", "a", encoding="utf-8") as f:
-                #     f.write(f"Aux[{aux_idx}]: log_mean={aux_log_prob_mean.item():.4f}, weight={aux_weight.item():.4f}")
-    
-    return weights
+    # Combined ratio at token level:
+    # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
+    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
+    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)  # clamp for numerical stability
+
+    # finaly exp() to remove log
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+    pg_losses1 = -advantages * seq_importance_ratio
+    pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean")
+
+    # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
+
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics
 
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
