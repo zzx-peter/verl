@@ -11,14 +11,14 @@ test_files="['$gsm8k_test_path']"
 
 clip_ratio_low=0.2 # as recommended by the paper, see Sec. 5.1
 clip_ratio_high=0.28 # as recommended by the paper, see Sec. 5.1
-clip_weight_low=0.2
+clip_weight_low=0.4
 clip_weight_high=0.0
 
 main_model=/root/autodl-tmp/huggingface_cache/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306
 aux_model=/root/autodl-tmp/huggingface_cache/models--Qwen--Qwen2.5-Math-1.5B-Instruct/snapshots/aafeb0fc6f22cbf0eaeed126eff8be45b0360a35
 offload=True
 
-python3 -m verl.trainer.main_ppo \
+CUDA_VISIBLE_DEVICES=0 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
@@ -31,7 +31,9 @@ python3 -m verl.trainer.main_ppo \
     aux_model.enable=True \
     aux_model.model.path=${aux_model} \
     actor_rollout_ref.actor.model_source_weighting=False \
+    actor_rollout_ref.actor.model_source_clip=True \
     actor_rollout_ref.actor.model_source_performance=True \
+    actor_rollout_ref.actor.use_aux_filter=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
@@ -63,7 +65,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger='["tensorboard"]' \
     trainer.project_name='grpo_gsm8k' \
-    trainer.experiment_name='qwen2.5-1.5b-Math_1.5b' \
+    trainer.experiment_name='qwen2.5-1.5b-Math_1.5b_new' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

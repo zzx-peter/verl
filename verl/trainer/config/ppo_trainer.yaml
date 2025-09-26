@@ -184,7 +184,10 @@ algorithm:
 trainer:
 
   # Whether to balance batch sizes across distributed workers
-  balance_batch: True
+  balance_batch: False
+
+  # Whether to balance model source across distributed workers
+  balance_model_source: False
 
   # Number of epochs in training
   total_epochs: 30

@@ -396,6 +396,29 @@ class DataParallelPPOActor(BasePPOActor):
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
+        len_mini_batches = len(data.batch.batch_size)
+        print(f"mini_batches: {len_mini_batches}")
+        if self.config.use_aux_filter:
+            # the second part of the mini bacthes are from aux model
+            # only keep one of them which has the highest score
+            best_score = 0.0
+            best_mini_batch = None
+            for i in range(len_mini_batches // 2, len_mini_batches):
+                if mini_batches[i].batch["token_level_scores"].sum(-1) >= best_score:
+                    best_score = mini_batches[i].batch["token_level_scores"].sum(-1).mean()
+                    best_mini_batch = mini_batches[i]
+            if best_mini_batch.batch["token_level_scores"].sum(-1).mean() < mini_batches[0].batch["token_level_scores"].sum(-1).mean() * 0.8:
+                mini_batches = None
+            # remove the second part of the mini batches expect for the best one
+            mini_batches = mini_batches[:len_mini_batches // 2] + [best_mini_batch]
+            if best_mini_batch is not None:
+                print(f"the socre of the last mini batch: {mini_batches[-1].batch['token_level_scores'].sum(-1).mean()}")
+                print(f"the best aux score: {best_score}")
+            else:
+                print("no aux model is better than the main model")
+            len_mini_batches = len(data.batch.batch_size)
+            print(f"mini_batches after filter: {len_mini_batches}")
+            
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
         metrics = {}

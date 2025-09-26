@@ -104,8 +104,10 @@ class ActorConfig(BaseConfig):
     clip_weight_high: float = 0.0
     clip_weight_low: float = 0.3
     model_source_weighting: bool = False
+    model_source_clip: bool = False
     model_source_performance: bool = False
     model_source_baseline: bool = False
+    use_aux_filter: bool = False
     policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
     clip_ratio_c: float = 3.0
     loss_agg_mode: str = "token-mean"

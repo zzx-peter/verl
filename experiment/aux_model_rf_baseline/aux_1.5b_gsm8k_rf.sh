@@ -36,12 +36,12 @@ python3 -m verl.trainer.main_ppo \
     aux_model.enable=True \
     aux_model.model.path=${aux_model} \
     actor_rollout_ref.actor.model_source_weighting=False \
-    actor_rollout_ref.actor.model_source_performance=False \
-    actor_rollout_ref.actor.model_source_baseline=False \
+    actor_rollout_ref.actor.model_source_performance=True \
+    algorithm.model_source_baseline=True \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=16  \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=mse \
@@ -53,7 +53,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_weight_low=${clip_weight_low} \
     actor_rollout_ref.actor.clip_weight_high=${clip_weight_high} \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
@@ -67,9 +67,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.project_name='rf_baseline_gsm8k' \
     trainer.experiment_name='qwen2.5_1.5b_Math-1.5b_baseline' \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=2 \
-    trainer.total_epochs=1 \
+    trainer.test_freq=3 \
+    trainer.total_epochs=3 \
     trainer.default_local_dir=/root/autodl-tmp/checkpoints/gspo_gsm8k/qwen2.5-1.5b $@

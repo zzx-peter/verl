@@ -1133,19 +1133,23 @@ class RayPPOTrainer:
                         # merge auxiliary model data to main batch
                         # batch = DataProto.concat([batch, aux_batch])
 
-                        # 假设 gen_batch_output 和 aux_gen_batch_output 都有 batch_size=N
-                        combined = DataProto.concat([batch, aux_batch])
+                        if self.config.trainer.balance_model_source:
+                            # given that gen_batch_output 和 aux_gen_batch_output 都有 batch_size=N
+                            # we can merge them together by interleaving them
+                            combined = DataProto.concat([batch, aux_batch])
 
-                        interleave_idx = []
-                        for i in range(aux_len):
-                            interleave_idx.append(i)       # main
-                            interleave_idx.append(i + aux_len)   # aux
+                            interleave_idx = []
+                            for i in range(aux_len):
+                                interleave_idx.append(i)       # main
+                                interleave_idx.append(i + aux_len)   # aux
 
-                        # 重排
-                        combined.reorder(torch.tensor(interleave_idx, dtype=torch.long))
+                            # 重排
+                            combined.reorder(torch.tensor(interleave_idx, dtype=torch.long))
 
-                        # 结果：model_source = [0,1,0,1,...]
-                        batch = combined
+                            # 结果：model_source = [0,1,0,1,...]
+                            batch = combined
+                        else:
+                            batch = DataProto.concat([batch, aux_batch])
                         print(f"Combined batch size after adding auxiliary model data: {batch.batch.batch_size[0]}")
                     else:
                         # standard single model processing
@@ -1385,6 +1389,16 @@ class RayPPOTrainer:
                                     )
                                     # recompute the performance
                                     batch.batch["performance"] = torch.reciprocal(batch.batch["performance"])
+
+                                # modify the batch sequence position: the first half and the second half are swapped
+                                batch_size = batch.batch.batch_size
+                                # create new indices: the second half + the first half
+                                new_indices = torch.cat([
+                                    torch.arange(batch_size // 2, batch_size),  # the second half
+                                    torch.arange(0, batch_size // 2)           # the first half
+                                ])
+                                # use DataProto's reorder method to directly adjust the position
+                                batch.reorder(new_indices)   
                                 aux_output = self.aux_model_wg.update_actor(batch)                           
                             else:
                                 # standard single model update

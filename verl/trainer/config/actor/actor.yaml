@@ -47,8 +47,14 @@ clip_weight_low: 0.3
 # Method for computing weights based on the similarity between models
 model_source_weighting: false
 
+# Whether to use clip range for aux model
+model_source_clip: false
+
 # Method for computing weights based on the performance among models
 model_source_performance: false
+
+# Whether to use aux model filter
+use_aux_filter: false
 
 # policy loss config
 policy_loss:

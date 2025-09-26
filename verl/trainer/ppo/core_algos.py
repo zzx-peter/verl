@@ -983,6 +983,8 @@ def compute_policy_loss_mappo_vanilla(
     cliprange = clip_ratio
     cliprange_low = clip_ratio_low
     cliprange_high = clip_ratio_high
+    clip_weight_low = config.clip_weight_low
+    clip_weight_high = config.clip_weight_high
 
     assert clip_ratio_c > 1.0, (
         "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
@@ -999,17 +1001,14 @@ def compute_policy_loss_mappo_vanilla(
         with torch.no_grad():
             main_mask = model_source == 0
             if config.model_source_weighting:
-                # print(f"model_source: {model_source}")
+                print(f"use model source weighting")
                 seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
                 negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
                 weights = torch.exp(negative_approx_kl_seq)
                 weights = torch.where(main_mask, torch.tensor(1.0, device=weights.device, dtype=weights.dtype), weights) 
 
                 # print(f"weights before clipped is {weights.tolist()}")
-                weight_metrics["model_weighting/weight_mean_before_clip"] = torch.mean(weights).detach().item()
-
-                clip_weight_low = config.clip_weight_low
-                clip_weight_high = config.clip_weight_high  
+                weight_metrics["model_weighting/weight_mean_before_clip"] = torch.mean(weights).detach().item()  
                 # use clip like gspo on weights
                 weights_clipped = torch.clamp(weights, 1 - clip_weight_low, 1 + clip_weight_high)
                 
@@ -1035,6 +1034,7 @@ def compute_policy_loss_mappo_vanilla(
                 seq_advantages_norm = (seq_advantages - baseline) / (std + eps)
                 advantages = seq_advantages_norm.unsqueeze(-1) * response_mask
             if config.model_source_performance:
+                print(f"use aux model performance")
                 aux_performance = torch.where(main_mask, torch.tensor(1.0, device=performance.device, dtype=performance.dtype), performance)
                 advantages = advantages * aux_performance.unsqueeze(-1)
 
@@ -1043,9 +1043,24 @@ def compute_policy_loss_mappo_vanilla(
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
-    pg_losses2 = -advantages * torch.clamp(
-        ratio, 1 - cliprange_low, 1 + cliprange_high
-    )  # - clip(ratio, 1-cliprange, 1+cliprange) * A
+    if model_source is not None and config.model_source_climp:
+        print("use aux model clip range")
+        # main model use the normal clip range, aux model use the clip range of aux model
+        main_mask = model_source == 0 
+        # For main model: use cliprange_low, cliprange_high
+        main_pg_losses2 = -advantages * torch.clamp(
+            ratio, 1 - cliprange_low, 1 + cliprange_high
+        )
+        # For aux model: use clip_weight_low, clip_weight_high  
+        aux_pg_losses2 = -advantages * torch.clamp(
+            ratio, 1 - clip_weight_low, 1 + clip_weight_high
+        )
+        # Combine based on model source
+        pg_losses2 = torch.where(main_mask.unsqueeze(-1), main_pg_losses2, aux_pg_losses2)
+    else:
+        pg_losses2 = -advantages * torch.clamp(
+            ratio, 1 - cliprange_low, 1 + cliprange_high
+        )  # - clip(ratio, 1-cliprange, 1+cliprange) * A
     clip_pg_losses1 = torch.maximum(
         pg_losses1, pg_losses2
     )  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
@@ -1067,7 +1082,7 @@ def compute_policy_loss_mappo_vanilla(
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics
 
 @register_policy_loss("mapo")
 def compute_policy_loss_mapo(
