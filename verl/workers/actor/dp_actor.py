@@ -388,6 +388,7 @@ class DataParallelPPOActor(BasePPOActor):
         # if model_source is in the data.batch.keys(), add it to the select_keys
         if "model_source" in data.batch.keys():
             select_keys.append("model_source")
+            select_keys.append("performance")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -450,7 +451,7 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
                     
                     # as for now, only vanilla loss mode support model_source
-                    if loss_mode == "mapo":
+                    if loss_mode == "mapo" or loss_mode == "mappo_vanilla":
                         pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, weight_metrics = policy_loss_fn(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,

@@ -90,4 +90,5 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
-    aux_model_weight: float = 1.0
+    # Different models use different baseline
+    model_source_baseline: bool = False

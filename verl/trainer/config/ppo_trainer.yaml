@@ -176,8 +176,8 @@ algorithm:
   # Auxiliary model weight for multi-model training
   # When using aux_model, this weight is applied to auxiliary model samples
   # during advantage computation. Higher values increase learning from aux samples.
-  # default is 1.0, which means no weighting
-  aux_model_weight: 1.0
+  # Different models use different baseline
+  model_source_baseline: false
 
 
 # config for the trainer
@@ -273,7 +273,7 @@ trainer:
   use_legacy_worker_impl: auto
 
   # in mapo, we use the gamma to update the performance of main model and aux model
-  mapo_gamma: 0.8
+  mapo_gamma: 0.0
 
 # profiler configs
 global_profiler:

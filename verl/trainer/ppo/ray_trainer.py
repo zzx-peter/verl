@@ -253,7 +253,8 @@ def compute_advantage(
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-            model_source = model_source
+            model_source = model_source,
+            model_source_baseline = config.model_source_baseline
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -271,7 +272,6 @@ def compute_advantage(
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
         if "model_source" in data.batch:  # optional - for multi-model weighting
             adv_kwargs["model_source"] = data.batch["model_source"]
-
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
         data.batch["advantages"] = advantages
@@ -1270,28 +1270,41 @@ class RayPPOTrainer:
 
                         # update accuracy of main_model and aux_model
                         if self.use_aux_model:
-                            main_model_accuracy = batch.batch["token_level_scores"][batch.batch["model_source"] == 0].mean()
-                            aux_model_accuracy = batch.batch["token_level_scores"][batch.batch["model_source"] == 1].mean()
+                            main_mask = batch.batch["model_source"] == 0
+                            aux_mask = batch.batch["model_source"] == 1
+                            scores_per_seq = batch.batch["token_level_scores"].sum(-1)  # (bs,)
+                            main_model_accuracy = scores_per_seq[main_mask].mean()
+                            aux_model_accuracy  = scores_per_seq[aux_mask].mean()
                             print(f"Main model accuracy: {main_model_accuracy}, Aux model accuracy: {aux_model_accuracy}")
-                            main_model_performance = main_model_performance * gamma + main_model_accuracy * (1 - gamma)
-                            aux_model_performance = aux_model_performance * gamma + aux_model_accuracy * (1 - gamma)
-                            print(f"Main model performance: {main_model_performance}, Aux model performance: {aux_model_performance}")
-                            # compute the ratio of main_model_performance and aux_model_performance
-                            performance = DataProto.from_dict(
-                                tensors={
-                                    "performance": torch.zeros_like(batch.batch["model_source"], dtype=torch.float)
-                                },
-                                meta_info={}
-                            )
                             # both of the accuarcy can not less than 0.1
                             if self.global_steps == 1:
                                 main_model_performance = main_model_accuracy
                                 aux_model_performance = aux_model_accuracy
+                            else:    
+                                main_model_performance = main_model_performance * gamma + main_model_accuracy * (1 - gamma)
+                                aux_model_performance = aux_model_performance * gamma + aux_model_accuracy * (1 - gamma)
+                            main_model_performance = 1e-8 if main_model_performance < 1e-8 else main_model_performance
+                            aux_model_performance = 1e-8 if aux_model_performance < 1e-8 else aux_model_performance    
+                            print(f"Main model performance: {main_model_performance}, Aux model performance: {aux_model_performance}")
 
-                            main_model_performance = 0.1 if main_model_performance < 0.1 else main_model_performance
-                            aux_model_performance = 0.1 if aux_model_performance < 0.1 else aux_model_performance
-                            performance["performance"] = aux_model_performance / main_model_performance
-                            performance_metrics = {"performance": aux_model_performance / main_model_performance}
+                            # compute the ratio of main_model_performance and aux_model_performance
+                            performance_ratio = aux_model_performance / main_model_performance
+                            if performance_ratio < 0.1:
+                                performance_ratio = 0.1
+                            if performance_ratio > 10:
+                                performance_ratio = 10
+
+                            performance = DataProto.from_dict(
+                                tensors={
+                                    "performance": torch.full_like(
+                                        batch.batch["model_source"], 
+                                        performance_ratio, 
+                                        dtype=torch.float
+                                    )
+                                },
+                                meta_info={}
+                            )
+                            performance_metrics = {"performance": performance_ratio}
                             metrics.update(performance_metrics)
                             batch = batch.union(performance)
 
@@ -1371,7 +1384,7 @@ class RayPPOTrainer:
                                         config=self.config.algorithm,
                                     )
                                     # recompute the performance
-                                    batch.batch["performance"] = main_model_performance / aux_model_performance
+                                    batch.batch["performance"] = torch.reciprocal(batch.batch["performance"])
                                 aux_output = self.aux_model_wg.update_actor(batch)                           
                             else:
                                 # standard single model update

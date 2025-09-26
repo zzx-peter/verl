@@ -50,9 +50,6 @@ model_source_weighting: false
 # Method for computing weights based on the performance among models
 model_source_performance: false
 
-# Different models use different baseline
-model_source_baseline: false
-
 # policy loss config
 policy_loss:
 
