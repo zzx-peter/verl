@@ -245,8 +245,11 @@ def compute_advantage(
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
         model_source = None
+        performance = None
         if "model_source" in data.batch:  # optional - for multi-model weighting
             model_source = data.batch["model_source"]
+        if "performance" in data.batch:
+            performance = data.batch["performance"]
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -254,7 +257,8 @@ def compute_advantage(
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
             model_source = model_source,
-            model_source_baseline = config.model_source_baseline
+            model_source_baseline = config.model_source_baseline,
+            performance = performance
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1391,7 +1395,7 @@ class RayPPOTrainer:
                                     batch.batch["performance"] = torch.reciprocal(batch.batch["performance"])
 
                                 # modify the batch sequence position: the first half and the second half are swapped
-                                batch_size = batch.batch.batch_size
+                                batch_size = batch.batch.batch_size[0]
                                 # create new indices: the second half + the first half
                                 new_indices = torch.cat([
                                     torch.arange(batch_size // 2, batch_size),  # the second half

@@ -20,6 +20,7 @@ offload=True
 
 CUDA_VISIBLE_DEVICES=0 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
+    actor_rollout_ref.actor.policy_loss.loss_mode=mappo_vanilla \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.train_batch_size=256 \
@@ -65,7 +66,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger='["tensorboard"]' \
     trainer.project_name='grpo_gsm8k' \
-    trainer.experiment_name='qwen2.5-1.5b-Math_1.5b_new' \
+    trainer.experiment_name='qwen2.5-1.5b-Math_1.5b_new_filter' \
     trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

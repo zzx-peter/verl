@@ -269,7 +269,8 @@ def compute_grpo_outcome_advantage(
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
     model_source = None,
-    model_source_baseline = False
+    model_source_baseline = False,
+    performance = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -328,9 +329,19 @@ def compute_grpo_outcome_advantage(
             main_model_scores = scores[main_model_mask]
             main_model_index = index[main_model_mask]
             mbsz = main_model_scores.shape[0]
-            # here we only use main model to compute the baseline in group
+            # compute the baseline
+            # if main model, weight 1.0
             for i in range(mbsz):
                 main_id2score[main_model_index[i]].append(main_model_scores[i])
+            # if aux model, weight 1/performance(performance is not 0)
+            aux_model_mask = model_source == 1
+            aux_model_scores = scores[aux_model_mask]
+            aux_model_index = index[aux_model_mask]
+            aux_model_performance_reciprocal = torch.reciprocal(performance[0]).item()
+            print(f"aux_model_performance_reciprocal: {aux_model_performance_reciprocal}")
+            absz = aux_model_scores.shape[0]
+            for i in range(absz):
+                main_id2score[aux_model_index[i]].append(aux_model_scores[i] * aux_model_performance_reciprocal)
             for idx in main_id2score:
                 if len(main_id2score[idx]) == 1:
                     id2mean[idx] = torch.tensor(0.0)
@@ -1034,7 +1045,7 @@ def compute_policy_loss_mappo_vanilla(
                 seq_advantages_norm = (seq_advantages - baseline) / (std + eps)
                 advantages = seq_advantages_norm.unsqueeze(-1) * response_mask
             if config.model_source_performance:
-                print(f"use aux model performance")
+                # print(f"use aux model performance")
                 aux_performance = torch.where(main_mask, torch.tensor(1.0, device=performance.device, dtype=performance.dtype), performance)
                 advantages = advantages * aux_performance.unsqueeze(-1)
 
@@ -1043,8 +1054,8 @@ def compute_policy_loss_mappo_vanilla(
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
-    if model_source is not None and config.model_source_climp:
-        print("use aux model clip range")
+    if model_source is not None and config.model_source_clip:
+        # print("use aux model clip range")
         # main model use the normal clip range, aux model use the clip range of aux model
         main_mask = model_source == 0 
         # For main model: use cliprange_low, cliprange_high
@@ -1118,6 +1129,8 @@ def compute_policy_loss_mapo(
     assert isinstance(config, ActorConfig)
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+    clip_weight_low = config.clip_weight_low
+    clip_weight_high = config.clip_weight_high
 
     negative_approx_kl = log_prob - old_log_prob
 
@@ -1137,10 +1150,7 @@ def compute_policy_loss_mapo(
                 weights = torch.where(main_mask, torch.tensor(1.0, device=weights.device, dtype=weights.dtype), weights) 
 
                 # print(f"weights before clipped is {weights.tolist()}")
-                weight_metrics["model_weighting/weight_mean_before_clip"] = torch.mean(weights).detach().item()
-
-                clip_weight_low = config.clip_weight_low
-                clip_weight_high = config.clip_weight_high  
+                weight_metrics["model_weighting/weight_mean_before_clip"] = torch.mean(weights).detach().item() 
                 # use clip like gspo on weights
                 weights_clipped = torch.clamp(weights, 1 - clip_weight_low, 1 + clip_weight_high)
                 
@@ -1179,7 +1189,24 @@ def compute_policy_loss_mapo(
     seq_importance_ratio = torch.exp(log_seq_importance_ratio)
 
     pg_losses1 = -advantages * seq_importance_ratio
-    pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    if model_source is not None and config.model_source_climp:
+        print("use aux model clip range")
+        # main model use the normal clip range, aux model use the clip range of aux model
+        main_mask = model_source == 0 
+        # For main model: use cliprange_low, cliprange_high
+        main_pg_losses2 = -advantages * torch.clamp(
+            seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high
+        )
+        # For aux model: use clip_weight_low, clip_weight_high  
+        aux_pg_losses2 = -advantages * torch.clamp(
+            seq_importance_ratio, 1 - clip_weight_low, 1 + clip_weight_high
+        )
+        # Combine based on model source
+        pg_losses2 = torch.where(main_mask.unsqueeze(-1), main_pg_losses2, aux_pg_losses2)
+    else:
+        pg_losses2 = -advantages * torch.clamp(
+            seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high
+        )  # - clip(ratio, 1-cliprange, 1+cliprange) * A
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
 
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
