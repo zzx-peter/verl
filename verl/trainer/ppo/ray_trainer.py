@@ -1293,14 +1293,14 @@ class RayPPOTrainer:
                                 aux_model_performance = aux_model_performance * gamma + aux_model_accuracy * (1 - gamma)
                             main_model_performance = 1e-8 if main_model_performance < 1e-8 else main_model_performance
                             aux_model_performance = 1e-8 if aux_model_performance < 1e-8 else aux_model_performance    
-                            print(f"Main model performance: {main_model_performance}, Aux model performance: {aux_model_performance}")
+                            # print(f"Main model performance: {main_model_performance}, Aux model performance: {aux_model_performance}")
 
                             # compute the ratio of main_model_performance and aux_model_performance
                             performance_ratio = aux_model_performance / main_model_performance
-                            if performance_ratio < 0.1:
-                                performance_ratio = 0.1
-                            if performance_ratio > 10:
-                                performance_ratio = 10
+                            if performance_ratio < 0.8:
+                                performance_ratio = 0.8
+                            if performance_ratio > 1.2:
+                                performance_ratio = 1.2
 
                             performance = DataProto.from_dict(
                                 tensors={
@@ -1315,7 +1315,7 @@ class RayPPOTrainer:
                             performance_metrics = {"performance": performance_ratio}
                             metrics.update(performance_metrics)
                             batch = batch.union(performance)
-
+                            print(f"actor: Performance: {batch.batch['performance'][0].item()}")
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1381,7 +1381,11 @@ class RayPPOTrainer:
                                         metrics.update(kl_metrics)
                                     else:
                                         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                                    # recompute the performance
+                                    batch.batch["performance"] = torch.reciprocal(batch.batch["performance"])
+                                    print(f"aux: Performance: {batch.batch['performance'][0].item()}")
                                     # recompute the advantage
+                                    # TODO: if don not use model_source baseline, there is no need to recompute the advantage
                                     batch = compute_advantage(
                                         batch,
                                         adv_estimator=self.config.algorithm.adv_estimator,
@@ -1391,9 +1395,6 @@ class RayPPOTrainer:
                                         norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                                         config=self.config.algorithm,
                                     )
-                                    # recompute the performance
-                                    batch.batch["performance"] = torch.reciprocal(batch.batch["performance"])
-
                                 # modify the batch sequence position: the first half and the second half are swapped
                                 batch_size = batch.batch.batch_size[0]
                                 # create new indices: the second half + the first half

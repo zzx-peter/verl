@@ -303,50 +303,48 @@ def compute_grpo_outcome_advantage(
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
-    main_id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
 
     with torch.no_grad():
         bsz = scores.shape[0]
-        for i in range(bsz):
-            id2score[index[i]].append(scores[i])
-        for idx in id2score:
-            if len(id2score[idx]) == 1:
-                id2mean[idx] = torch.tensor(0.0)
-                id2std[idx] = torch.tensor(1.0)
-            elif len(id2score[idx]) > 1:
-                scores_tensor = torch.stack(id2score[idx])
-                id2mean[idx] = torch.mean(scores_tensor)
-                id2std[idx] = torch.std(scores_tensor)
-            else:
-                raise ValueError(f"no score in prompt index: {idx}")
         # main model and aux model use different baseline in group
         # recompute the mean
         if model_source is not None and model_source_baseline:
-            print("different model use different baseline in group")
-            main_model_mask = model_source == 0
-            main_model_scores = scores[main_model_mask]
-            main_model_index = index[main_model_mask]
-            mbsz = main_model_scores.shape[0]
-            # compute the baseline
-            # if main model, weight 1.0
-            for i in range(mbsz):
-                main_id2score[main_model_index[i]].append(main_model_scores[i])
-            # if aux model, weight 1/performance(performance is not 0)
-            aux_model_mask = model_source == 1
-            aux_model_scores = scores[aux_model_mask]
-            aux_model_index = index[aux_model_mask]
             aux_model_performance_reciprocal = torch.reciprocal(performance[0]).item()
+            aux_model_performance_reciprocal = max(0.8, min(aux_model_performance_reciprocal, 1.0))  # Clamp to [0.8, 1.0]
             print(f"aux_model_performance_reciprocal: {aux_model_performance_reciprocal}")
-            absz = aux_model_scores.shape[0]
-            for i in range(absz):
-                main_id2score[aux_model_index[i]].append(aux_model_scores[i] * aux_model_performance_reciprocal)
-            for idx in main_id2score:
-                if len(main_id2score[idx]) == 1:
+
+            # Update id2score with weighted aux model scores
+            for i in range(bsz):
+                if model_source[i] == 0:  # main model
+                    id2score[index[i]].append(scores[i])
+                elif model_source[i] == 1:  # aux model
+                    id2score[index[i]].append(scores[i] * aux_model_performance_reciprocal)
+
+            # Recompute mean and std using the weighted scores
+            for idx in id2score:
+                if len(id2score[idx]) == 1:
                     id2mean[idx] = torch.tensor(0.0)
-                elif len(main_id2score[idx]) > 1:
-                    id2mean[idx] = torch.mean(torch.stack(main_id2score[idx]))
+                    id2std[idx] = torch.tensor(1.0)
+                elif len(id2score[idx]) > 1:
+                    weight_scores_tensor = torch.stack(id2score[idx])
+                    id2mean[idx] = torch.mean(weight_scores_tensor)
+                    id2std[idx] = torch.std(weight_scores_tensor)
+                else:
+                    raise ValueError(f"no score in prompt index: {idx}")
+        # the normal case
+        else:
+            for i in range(bsz):
+                id2score[index[i]].append(scores[i])
+            for idx in id2score:
+                if len(id2score[idx]) == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                elif len(id2score[idx]) > 1:
+                    scores_tensor = torch.stack(id2score[idx])
+                    id2mean[idx] = torch.mean(scores_tensor)
+                    id2std[idx] = torch.std(scores_tensor)
                 else:
                     raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
@@ -1189,8 +1187,8 @@ def compute_policy_loss_mapo(
     seq_importance_ratio = torch.exp(log_seq_importance_ratio)
 
     pg_losses1 = -advantages * seq_importance_ratio
-    if model_source is not None and config.model_source_climp:
-        print("use aux model clip range")
+    if model_source is not None and config.model_source_clip:
+        # print("use aux model clip range")
         # main model use the normal clip range, aux model use the clip range of aux model
         main_mask = model_source == 0 
         # For main model: use cliprange_low, cliprange_high
