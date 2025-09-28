@@ -312,6 +312,7 @@ def compute_grpo_outcome_advantage(
         # recompute the mean
         if model_source is not None and model_source_baseline:
             aux_model_performance_reciprocal = torch.reciprocal(performance[0]).item()
+            # TODO: user can set the threshold
             aux_model_performance_reciprocal = max(0.8, min(aux_model_performance_reciprocal, 1.0))  # Clamp to [0.8, 1.0]
             print(f"aux_model_performance_reciprocal: {aux_model_performance_reciprocal}")
 
@@ -1045,6 +1046,8 @@ def compute_policy_loss_mappo_vanilla(
             if config.model_source_performance:
                 # print(f"use aux model performance")
                 aux_performance = torch.where(main_mask, torch.tensor(1.0, device=performance.device, dtype=performance.dtype), performance)
+                # TODO: user can set the threshold
+                aux_performance = torch.clamp(aux_performance, min=0.8, max=1.2)
                 advantages = advantages * aux_performance.unsqueeze(-1)
 
     pg_losses1 = -advantages * ratio

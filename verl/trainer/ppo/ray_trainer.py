@@ -1297,10 +1297,6 @@ class RayPPOTrainer:
 
                             # compute the ratio of main_model_performance and aux_model_performance
                             performance_ratio = aux_model_performance / main_model_performance
-                            if performance_ratio < 0.8:
-                                performance_ratio = 0.8
-                            if performance_ratio > 1.2:
-                                performance_ratio = 1.2
 
                             performance = DataProto.from_dict(
                                 tensors={

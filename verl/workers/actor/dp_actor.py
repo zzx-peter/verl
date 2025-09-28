@@ -374,7 +374,6 @@ class DataParallelPPOActor(BasePPOActor):
             "position_ids",
             "old_log_probs",
             "advantages",
-            "token_level_scores",
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
@@ -397,33 +396,22 @@ class DataParallelPPOActor(BasePPOActor):
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
+        metrics = {}
         len_mini_batches = len(mini_batches)
         print(f"mini_batches: {len_mini_batches}")
         if self.config.use_aux_filter:
-            # the second part of the mini bacthes are from aux model
-            # only keep one of them which has the highest score
-            best_score = 0.0
-            best_mini_batch = None
-            for i in range(len_mini_batches // 2, len_mini_batches):
-                if mini_batches[i].batch["token_level_scores"].sum(-1).mean().item() >= best_score:
-                    best_score = mini_batches[i].batch["token_level_scores"].sum(-1).mean().item()
-                    best_mini_batch = mini_batches[i]
-            if best_mini_batch.batch["token_level_scores"].sum(-1).mean().item() < mini_batches[0].batch["token_level_scores"].sum(-1).mean().item() * 0.8:
-                best_mini_batch = None
-            # remove the second part of the mini batches expect for the best one
-            if best_mini_batch is not None:
-                mini_batches = mini_batches[:len_mini_batches // 2] + [best_mini_batch]
-                print(f"the socre of the last mini batch: {mini_batches[-1].batch['token_level_scores'].sum(-1).mean().item()}")
-                print(f"the best aux score: {best_score}")
-            else:
+            # TODO: user can set the threshold
+            if data.batch["model_source"][0].item() <= 3:
+                print(f"only use the main model")
                 mini_batches = mini_batches[:len_mini_batches // 2]
-                print("no aux model is better than the main model")
-            len_mini_batches = len(mini_batches)
-            print(f"mini_batches after filter: {len_mini_batches}")
-
+                for mini_batch in mini_batches:
+                    assert mini_batch.batch["model_source"].sum().item() == 0
+            len_mini_batches_after_filter = len(mini_batches)
+            print(f"mini_batches after filter: {len_mini_batches_after_filter}")
+        
+        mini_batches_metrics = {"actor/use_aux_model": 1 if len_mini_batches_after_filter < len_mini_batches else 0}
+        metrics.update(mini_batches_metrics)
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
-
-        metrics = {}
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
