@@ -400,12 +400,14 @@ class DataParallelPPOActor(BasePPOActor):
         len_mini_batches = len(mini_batches)
         print(f"mini_batches: {len_mini_batches}")
         if self.config.use_aux_filter:
+            for i in range(len_mini_batches // 2):
+                assert mini_batches[i].batch["model_source"].sum().item() == 0
             # TODO: user can set the threshold
-            if data.batch["model_source"][0].item() <= 3:
+            if data.batch["performance"][0].item() <= 3:
                 print(f"only use the main model")
                 mini_batches = mini_batches[:len_mini_batches // 2]
-                for mini_batch in mini_batches:
-                    assert mini_batch.batch["model_source"].sum().item() == 0
+            else:
+                print(f"use the aux model")
             len_mini_batches_after_filter = len(mini_batches)
             print(f"mini_batches after filter: {len_mini_batches_after_filter}")
         

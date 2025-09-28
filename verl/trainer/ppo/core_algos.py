@@ -314,7 +314,7 @@ def compute_grpo_outcome_advantage(
             aux_model_performance_reciprocal = torch.reciprocal(performance[0]).item()
             # TODO: user can set the threshold
             aux_model_performance_reciprocal = max(0.8, min(aux_model_performance_reciprocal, 1.0))  # Clamp to [0.8, 1.0]
-            print(f"aux_model_performance_reciprocal: {aux_model_performance_reciprocal}")
+            # print(f"aux_model_performance_reciprocal: {aux_model_performance_reciprocal}")
 
             # Update id2score with weighted aux model scores
             for i in range(bsz):

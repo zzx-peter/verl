@@ -1126,7 +1126,7 @@ class RayPPOTrainer:
                         gen_batch_output.batch["model_source"] = torch.zeros(
                             gen_batch_output.batch.batch_size[0], dtype=torch.long
                         )
-                        print(f"Marked {gen_batch_output.batch.batch_size[0]} sequences from main model")
+                        # print(f"Marked {gen_batch_output.batch.batch_size[0]} sequences from main model")
                         
                         # merge main model rollouts to batch
                         batch = batch.union(gen_batch_output)
@@ -1311,7 +1311,6 @@ class RayPPOTrainer:
                             performance_metrics = {"performance": performance_ratio}
                             metrics.update(performance_metrics)
                             batch = batch.union(performance)
-                            print(f"actor: Performance: {batch.batch['performance'][0].item()}")
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1355,6 +1354,7 @@ class RayPPOTrainer:
                                 # use_aux_model update
                                 batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                                 print(f"Updating actor")
+                                print(f"actor: Performance: {batch.batch['performance'][0].item()}")
                                 actor_output = self.actor_rollout_wg.update_actor(batch)
                                 # reverse the model_source to get the auxiliary model data
                                 print(f"Updating auxiliary model")
